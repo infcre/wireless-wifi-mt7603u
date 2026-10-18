@@ -22,9 +22,14 @@ symbols** (every import exists in that kernel's or `cfg80211.ko`'s export table)
 | `kmod-mt7603u-ap_6.6.93-r1_x86_64.ipk` | OpenWrt 24.10.2 x86_64 — AP mode | 591 KB |
 | `kmod-mt7603u-sta_6.6.93-r1_x86_64.ipk` | OpenWrt 24.10.2 x86_64 — STA mode | 602 KB |
 | `mt7603u-files_1_all.ipk` | firmware + `/etc/Wireless/*.dat` (both modes) | 86 KB |
-| `mt7603u_ap.ko` | Debian 13, `6.12.101+deb13-amd64` — AP mode | 3.3 MB |
-| `mt7603u_sta.ko` | Debian 13, `6.12.101+deb13-amd64` — STA mode | 3.4 MB |
-| `mt7603u_sta.ko` (aarch64) | Armbian, `6.18.54-ophub` (S905L3B) — STA mode | 1.8 MB |
+| `mt7603u_ap-6.12.101+deb13-amd64-x86_64.ko` | Debian 13 — AP mode | 3.3 MB |
+| `mt7603u_sta-6.12.101+deb13-amd64-x86_64.ko` | Debian 13 — STA mode | 3.4 MB |
+| `mt7603u_sta-6.18.54-ophub-aarch64.ko` | Armbian, S905L3B — STA mode | 1.8 MB |
+| `SHA256SUMS.txt` | checksums of the above | 616 B |
+
+(The two `.ko` for the same mode come from different kernels, so the release
+assets carry the kernel/arch in the filename; in the tree they live under
+`dist/<platform>/` with their original names.)
 
 SHA256:
 
