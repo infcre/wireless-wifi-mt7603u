@@ -116,20 +116,60 @@ ip addr add 192.168.50.1/24 dev wlan0
 hostapd -B /etc/mt7603u/hostapd.conf
 ```
 
-要让客户端还能上网，再给它一个 DHCP + NAT（或把 `wlan0` 加进 `br-lan` 网桥）：
+**让客户端能上网：两个办法**（真机上验证过的是第二种）
 
 ```sh
-# 加到 lan 防火墙区（这样 lan->wan 的转发与 masq 都复用它）
-uci add_list firewall.@zone[0].device='wlan0'
+# 办法一：独立网段 + 第二个 dnsmasq + 单独放通防火墙
+# （客户端在 192.168.50.x，与 LAN 隔离；适合访客网络）
+ip addr add 192.168.50.1/24 dev wlan0
+uci add_list firewall.@zone[0].device='wlan0'    # 借用 lan 区的 forward/masq
 uci commit firewall && /etc/init.d/firewall reload
-
-# 独立的 DHCP 池（与 br-lan 不同网段时）
 dnsmasq --conf-file=/dev/null -i wlan0 --bind-interfaces --port=0 \
         --dhcp-range=192.168.50.100,192.168.50.200,255.255.255.0,12h \
         --dhcp-option=3,192.168.50.1
 ```
 
-验证过的事实（虚拟机内）：手机关联 → WPA2 四次握手 → DHCP 租约 → 双向 ARP/ping 0% 丢包。
+### 3b. 装在真路由器上（已在一台 x86_64 OpenWrt 24.10.2 上验证）
+
+第二条路 —— **桥进 `br-lan`**，客户端落进真正的 LAN，DHCP/防火墙/NAT 全部继承现成的，
+不需要额外 dnsmasq、也不改防火墙。一体化脚本：
+[`../tools/router/bring-up-ap.sh`](../tools/router/bring-up-ap.sh)。
+
+```sh
+opkg install kmod-cfg80211 kmod-mac80211 mt7603u-files_*.ipk kmod-mt7603u-ap_*.ipk
+
+# 1) 打开接口 —— 这一步才跑 rt28xx_init（固件下载 / EFUSE 读 MAC / 校准）
+ip link set wlan0 up
+
+# 2) 删掉 OpenWrt 自动收编出来的 radio1，别让 netifd 去驱动厂商驱动
+uci -q delete wireless.radio1
+for s in $(uci show wireless | sed -n "s/^wireless\.\([^.]*\)\.device='radio1'$/\1/p"); do
+    uci -q delete wireless.$s
+done
+uci commit wireless
+
+# 3) hostapd：必须“先无桥”启动（bridge= 在这个驱动上会失败），并用 -P 记 pid
+setsid hostapd -P /var/run/hostapd-mt7603u.pid /etc/mt7603u/hostapd.conf \
+    >/tmp/hostapd-mt7603u.log 2>&1 &
+
+# 4) AP 起来之后再挂进 LAN 桥 —— 客户端直接用原有 dnsmasq + lan→wan NAT
+ip link set wlan0 master br-lan
+```
+
+三个必须知道的坑（详见 [`REPORT.md`](REPORT.md) §3.7）：
+
+| 坑 | 症状 | 做法 |
+|---|---|---|
+| hostapd `bridge=` | `Could not set channel for kernel driver` + 11× `Match already configured` | 先无桥起 AP，再 `ip link set master` |
+| 残留 hostapd | 之后每次启动都同样报"信道"错误 | `hostapd -P <pidfile>`，按 **PID** 杀；busybox 的 `pkill -f` 不可靠 |
+| OpenWrt 自动收编 phy | `/etc/config/wireless` 多出 `radio1`（band 猜成 5g） | 删掉，避免 netifd 操作厂商驱动 |
+
+真机验证链（同一部手机）：`associated` → `EAPOL-4WAY-HS-COMPLETED` →
+`DHCPACK 192.168.1.196` → `ip neigh` REACHABLE → 能上网；期间原有的 5GHz 上行
+（`phy0-sta0`）ping 0% 丢包，未受影响。
+
+> 以上都**不会**在重启后保留（没有 autoload 条目，hostapd 与桥接都是手工的）。
+> 这是有意为之的安全设计：出问题时断电重启即可回到原状。要固化再往下做 init 脚本。
 
 ---
 

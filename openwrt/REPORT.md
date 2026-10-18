@@ -288,6 +288,67 @@ TX 基本一致；OpenWrt 侧 RX 偏低，主要变量是**卡现在直接插在
 
 （`RT2870AP.dat` 与厂商默认一致，无需改动。）
 
+### 3.7 真机验证：一台物理 OpenWrt 路由器（x86_64, 24.10.2）
+
+前面都在虚拟机里跑；最后在**一台真路由器**上（就是它承担着整个网络的上网流量）又走了一遍，
+结论一致，并额外暴露了三个**只在真机/长期运行下才会出现**的坑。
+
+证据链（同一部红米 K80 Pro，MAC `72:86:0b:xx:xx:xx`）：
+
+| 环节 | 证据 |
+|---|---|
+| 模块加载 | `opkg install kmod-mt7603u-ap` → **kmodloader 随即加载**（`rtusb init mt_drv` → `80211> CFG80211_Register`）|
+| 接口初始化 | `ip link set wlan0 up` → `Main bssid = b0:d5:9d:xx:xx:xx`、`<==== rt28xx_init, Status=0`、`NumOfChan= 14` |
+| AP 启动 | `hostapd` → `wlan0: AP-ENABLED`，`iw dev` 报 `ssid MT7603U-AP / type AP` |
+| 客户端关联 | `STA … IEEE 802.11: associated` → `AP-STA-CONNECTED … auth_alg=open` → `EAPOL-4WAY-HS-COMPLETED` |
+| 地址 | `DHCPACK 192.168.1.196 … REDMI-K80-Pro`；`ip neigh` 该地址 `REACHABLE` |
+| 驱动侧 | `Rcv Wcid(1) AddBAReq` —— 驱动自己看到客户端并建立了 BA 会话 |
+| 上网 | 手机可正常上网（`wlan0` 桥进 `br-lan`，沿用原有 dnsmasq 与 lan→wan NAT）|
+| 未影响原有链路 | 全程 `phy0-sta0 → 10.65.255.254` ping 0% 丢包 |
+
+> 一个容易误判的点：`opkg install` 一个 kmod 包**会触发 kmodloader**，即"装完就等于加载了"。
+> 这次因此"意外地"完成了加载那一步——所幸结果是干净的。反过来说，
+> 若模块在加载时就 oops，而事先没删掉 `/etc/modules.d/` 里的自启条目，那**每次开机都会重现这个故障**。
+> 所以稳妥流程是：先删自启条目、手工验证，最后再启用自启。
+
+#### 三个真机才暴露的坑
+
+1. **OpenWrt 会把我们的 phy 自动收编成 `radio1`**
+   `/etc/hotplug.d/ieee80211/10-wifi-detect` 在 `CFG80211_Register` 之后触发，往
+   `/etc/config/wireless` 追加：
+
+   ```
+   config wifi-device 'radio1'
+       option path 'pci0000:00/0000:00:12.0/usb3/3-1/3-1.1'
+       option band '5g'          # 猜错了，这卡是 2.4G
+       option disabled '1'       # 好在默认禁用
+   config wifi-iface 'default_radio1'
+       option device 'radio1'  option mode 'ap'  option network 'lan'
+   ```
+
+   虽然默认禁用，但一旦有人 `wifi up` 或点 LuCI，netifd/hostapd 就会去驱动一个**厂商驱动**。
+   必须删掉（`uci delete wireless.radio1` 以及引用它的 iface）。
+
+2. **hostapd 的 `bridge=` 参数在这个驱动上不可用**
+   走桥接模式时，hostapd 把接口挂进桥之后**会再单独下发一次信道配置**，而 cfg80211 因为
+   "已经是 AP、已经在该信道"返回 `EALREADY`，hostapd 随即放弃：
+
+   ```
+   nl80211: kernel reports: Match already configured   (×11)
+   Could not set channel for kernel driver
+   Interface initialization failed
+   ```
+
+   不带 `bridge=` 时，信道随 `START_AP` 一次下发，正常。
+   **正确顺序：先在无桥配置下起 AP，再 `ip link set wlan0 master br-lan`。**
+
+3. **hostapd 必须按 PID 杀；busybox 的 `pkill -f` 不可靠**
+   残留实例会一直占着管理帧注册，导致之后每次启动都失败，而且报错**指向信道**——
+   实际上 `Match already configured` 来自 `cfg80211_mlme_register_mgmt()`（管理帧注册），
+   与信道无关，极易误判成"驱动不支持改信道"。现在统一用 `hostapd -P <pidfile>` 启动、按 PID 清理。
+
+可直接复用的脚本：[`../tools/router/bring-up-ap.sh`](../tools/router/bring-up-ap.sh)。
+
 
 ```
 owrt/
