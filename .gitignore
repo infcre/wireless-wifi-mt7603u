@@ -10,6 +10,9 @@ modules.order
 !DPOA/tools/plug_in/Module.symvers
 !DPOA/tools/plug_in/modules.order
 
+# ...but keep the deliberate prebuilt artifacts that dist/ documents
+!dist/**/*.ko
+
 # local credentials for the test harness (copy .env.example)
 .env
 

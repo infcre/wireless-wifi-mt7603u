@@ -17,10 +17,24 @@ This fork keeps that tree and its layout, and adds:
 * **Prebuilt ipks** (`dist/`) for OpenWrt 24.10.2 x86_64 — verified there.
 * **A QEMU/KVM harness** (`tools/`) that boots a real OpenWrt image and passes
   the USB stick through, so the driver can be tested without touching a router.
-* **The reports** — `openwrt/REPORT.md` (this port, in Chinese) and the Debian
-  bring-up it builds on, including the measurements.
+* **The Debian/Armbian bring-up** (`docs/debian-bringup/`) — the earlier
+  from-scratch port to Linux 6.12 / 6.18, its two arm64-only runtime bugs, the
+  RX-throughput mystery, and the prebuilt x86_64 modules
+  (`dist/debian-x86_64-6.12.101/`).
 
 `git diff upstream:master` is the port. Nothing else in `DPOA/` was touched.
+
+## Repo layout
+
+```
+DPOA/                      the vendor driver tree, ported (upstream layout kept)
+openwrt/package/kernel/mt7603u/
+                           kmod-mt7603u-ap / -sta / mt7603u-files
+openwrt/REPORT.md, README.md   the OpenWrt port: pitfalls, evidence, how-to
+docs/debian-bringup/       the Debian/Armbian port: full report + notes
+dist/                      prebuilt ipks (OpenWrt) and .ko (Debian 6.12.101)
+tools/                     QEMU harness (OpenWrt) + build/run helpers (Debian)
+```
 
 ## Status
 
