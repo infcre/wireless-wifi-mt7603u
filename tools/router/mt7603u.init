@@ -1,0 +1,324 @@
+#!/bin/sh /etc/rc.common
+# MT7603U (360 随身WiFi 3) AP bring-up for OpenWrt.
+#
+#   /etc/init.d/mt7603u start|stop|restart|reload
+#   /etc/init.d/mt7603u enable      # autostart on boot
+#
+# Verified on OpenWrt 24.10.2 x86_64, kernel 6.6.93, with kmod-cfg80211 from
+# backports 6.12.6 -- see openwrt/REPORT.md.  It reproduces, in the order that
+# was proven to work, the four steps that matter:
+#
+#   1. find OUR interface            (by driver/module, never by name)
+#   2. open it                       -> rt28xx_init: firmware, EFUSE MAC, calibration
+#   3. start hostapd unbridged       -> bridge= is broken with this driver
+#   4. enslave it to br-lan          -> clients inherit DHCP/firewall/NAT from the LAN
+#
+# Three traps this script works around (each cost real time on real hardware):
+#
+#   * hostapd must NOT get `bridge=br-lan'.  On that path hostapd joins the
+#     bridge and then configures the channel separately; cfg80211 answers
+#     EALREADY and hostapd aborts with "Could not set channel for kernel driver".
+#     So: start unbridged, bridge afterwards.
+#
+#   * hostapd must be killed by PID.  Busybox's `pkill -f' misses it, and a
+#     surviving instance keeps its mgmt-frame registrations, after which every
+#     later start fails with "Match already configured" -- which comes from
+#     cfg80211_mlme_register_mgmt(), not from the channel code it appears next to.
+#
+#   * OpenWrt's /etc/hotplug.d/ieee80211/10-wifi-detect adopts the vendor phy and
+#     appends a `radioN' to /etc/config/wireless (band guessed as 5g).  Harmless
+#     while disabled, but if it is ever enabled netifd drives a vendor driver as
+#     if it were mac80211 -- which fails per the first trap.  Removed here, and
+#     matched by sysfs path so the *other* wireless card is never touched.
+#
+# NOTE: this is a plain init script (no procd supervision), so if hostapd dies
+# the AP stays down until the next start/restart.  That is a deliberate trade for
+# something debuggable on a box you cannot always reach.
+
+START=99
+STOP=10
+
+# ---------------------------------------------------------------------------
+# settings -- edit here
+# ---------------------------------------------------------------------------
+MODULE=mt7603u_ap          # kmod-mt7603u-ap: AP mode.  (sta module: mt7603u_sta)
+SSID=MT7603U-AP
+PSK=mt7603u12345
+CHANNEL=11
+BRIDGE=br-lan              # enslave the AP here so clients use the LAN's DHCP/NAT
+CONF=/etc/mt7603u/hostapd.conf
+PIDFILE=/var/run/hostapd-mt7603u.pid
+CTRLDIR=/var/run/hostapd-mt7603u
+LOG=/tmp/mt7603u.log
+
+log() { echo "$(date '+%H:%M:%S') $*" >> "$LOG"; }
+
+# ---------------------------------------------------------------------------
+# 1. find our interface by DRIVER, not by name.
+#
+# The box has other wireless NICs (ath9k on PCIe; rt2x00/rtl8192 modules are
+# loaded as well), so a netdev name means nothing -- ours could be wlan0 or
+# wlan1 depending on probe order.  Netdev names must never be part of the match.
+#
+# The sysfs chain, as it actually looks on such a box (measured, not assumed):
+#
+#   /sys/class/net/wlan0/device                  -> .../usb3/3-1/3-1.1  (USB *device*)
+#   /sys/class/net/wlan0/device/driver           -> usb                 (generic, useless)
+#   /sys/bus/usb/drivers/mt_drv/3-1.1:1.0        <- our driver's bound interface
+#        driver  -> mt_drv
+#        module  -> mt7603u_ap
+#
+# i.e. the driver is bound one level *below* the netdev's device, so reading
+# <netdev>/device/driver gives "usb" for ours and would have matched nothing.
+# (ath9k's PCIe device happens to expose driver/module correctly, which is why a
+# naive check looks right until it meets a USB netdev.)
+#
+# So: ask the driver which devices it owns, then find the netdevs sitting on
+# them.  Note that <interface>/net/ is empty for this vendor driver (it does not
+# parent the netdev to the USB interface), hence the two-step lookup.
+# ---------------------------------------------------------------------------
+DRIVER=mt_drv               # both our modules register this driver name
+
+iface_of_mt7603u() {
+	# (a) authoritative: the driver's own bound USB interfaces -> their USB device
+	for bound in /sys/bus/usb/drivers/$DRIVER/*:*; do
+		[ -d "$bound" ] || continue
+		bdev="$(readlink -f "$bound/.." 2>/dev/null)"
+		[ -n "$bdev" ] || continue
+		for n in /sys/class/net/*; do
+			i="${n##*/}"
+			case "$i" in lo|br-*|docker*|veth*|sit*|tun*|eth*) continue;; esac
+			[ "$(readlink -f "$n/device" 2>/dev/null)" = "$bdev" ] && { echo "$i"; return 0; }
+		done
+	done
+
+	# (b) fallback: any netdev whose device, or a child interface of it, is
+	#     driven by us.  Covers transports where the parent is the interface.
+	for n in /sys/class/net/*; do
+		i="${n##*/}"
+		case "$i" in lo|br-*|docker*|veth*|sit*|tun*|eth*) continue;; esac
+		dev="$(readlink -f "$n/device" 2>/dev/null)"
+		[ -n "$dev" ] || continue
+		for cand in "$dev" "$dev"/*:*; do
+			[ -e "$cand/driver" ] || continue
+			d="$(basename "$(readlink -f "$cand/driver" 2>/dev/null)" 2>/dev/null)"
+			m="$(basename "$(readlink -f "$cand/driver/module" 2>/dev/null)" 2>/dev/null)"
+			{ [ "$d" = "$DRIVER" ] || [ "$m" = "$MODULE" ]; } && { echo "$i"; return 0; }
+		done
+	done
+	return 1
+}
+
+wait_iface() {
+	left="${1:-20}"
+	while [ "$left" -gt 0 ]; do
+		i="$(iface_of_mt7603u)" && { echo "$i"; return 0; }
+		sleep 1
+		left=$((left - 1))
+	done
+	return 1
+}
+
+# ---------------------------------------------------------------------------
+# drop the wifi-device section OpenWrt auto-created for our phy.
+#
+# Matched by sysfs path, never by radio number or netdev name, so the other
+# wireless card (ath9k, on a PCI path) can never match.
+#
+# Careful with the two spellings of the same device:
+#   /sys/class/net/<if>/device        -> .../usb3/3-1/3-1.1/3-1.1:1.0   (interface)
+#   wireless.radioN.path (wifi-detect)-> .../usb3/3-1/3-1.1             (usb device)
+# so compare the interface-stripped form and accept either as an ancestor.
+# ---------------------------------------------------------------------------
+drop_detected_radio() {
+	iface="$1"
+	[ -f /etc/config/wireless ] || return 0
+
+	dev="$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null)"
+	[ -n "$dev" ] || return 0
+	case "${dev##*/}" in
+		*:*) dev="${dev%/*}" ;;      # strip the ":1.0" interface suffix
+	esac
+	ourpath="${dev#/sys/devices/}"
+	log "  our sysfs path: $ourpath"
+
+	changed=0
+	for s in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.path='\(.*\)'\$/\1 \2/p"); do
+		set -- $s
+		sec="$1"
+		upath="$2"
+		match=0
+		case "$upath" in
+			"$ourpath") match=1 ;;
+			"$ourpath"/*) match=1 ;;
+			"$ourpath"*:*) match=1 ;;
+		esac
+		case "$ourpath" in
+			"$upath"/*) match=1 ;;
+		esac
+		[ "$match" = 1 ] || continue
+
+		log "  removing auto-detected wireless.$sec (path=$upath)"
+		for i in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.device='$sec'\$/\1/p"); do
+			uci -q delete "wireless.$i"
+		done
+		uci -q delete "wireless.$sec"
+		changed=1
+	done
+	[ "$changed" = 1 ] && uci commit wireless
+	return 0
+}
+
+write_conf() {
+	iface="$1"
+	mkdir -p /etc/mt7603u
+	cat > "$CONF" <<EOF
+interface=$iface
+driver=nl80211
+ctrl_interface=$CTRLDIR
+ctrl_interface_group=0
+
+ssid=$SSID
+hw_mode=g
+channel=$CHANNEL
+ieee80211n=1
+ht_capab=[SHORT-GI-20]
+wmm_enabled=1
+
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+wpa_passphrase=$PSK
+
+logger_syslog=-1
+logger_syslog_level=2
+logger_stdout=1
+logger_stdout_level=2
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# kill hostapd instances for *this* config, by PID (see the trap above)
+# ---------------------------------------------------------------------------
+kill_stale() {
+	if [ -f "$PIDFILE" ]; then
+		kill "$(cat "$PIDFILE")" 2>/dev/null
+	fi
+	for p in $(ps | grep "[h]ostapd .*mt7603u" | awk '{print $1}'); do
+		kill "$p" 2>/dev/null
+	done
+	sleep 2
+	for p in $(ps | grep "[h]ostapd .*mt7603u" | awk '{print $1}'); do
+		kill -9 "$p" 2>/dev/null
+	done
+	rm -rf "$CTRLDIR"
+}
+
+start() {
+	: > "$LOG"
+	log "=== mt7603u start ==="
+
+	# --- module ---
+	if ! grep -q "^$MODULE " /proc/modules 2>/dev/null; then
+		log "loading $MODULE"
+		modprobe "$MODULE" 2>>"$LOG" || {
+			ko=/lib/modules/$(uname -r)/$MODULE.ko
+			[ -f "$ko" ] || { log "no module and no $ko -- giving up"; return 0; }
+			insmod "$ko" 2>>"$LOG" || { log "insmod failed -- giving up"; return 0; }
+		}
+	fi
+
+	# --- our interface (by driver, never by name) ---
+	IFACE="$(wait_iface 25)" || {
+		log "no mt7603u netdev appeared -- card absent? nothing to do"
+		return 0          # never block boot because the stick is unplugged
+	}
+	log "interface: $IFACE"
+
+	# --- open it: this is what runs rt28xx_init ---
+	ip link set "$IFACE" up
+	sleep 8
+	mac="$(cat "/sys/class/net/$IFACE/address" 2>/dev/null)"
+	log "mac: $mac   (00:00:00:00:00:00 would mean the radio never initialised)"
+	[ "$mac" = "00:00:00:00:00:00" ] && { log "radio did not come up"; sleep 4; }
+
+	# --- don't let netifd/LuCI drive a vendor driver ---
+	drop_detected_radio "$IFACE"
+
+	# --- hostapd, unbridged ---
+	write_conf "$IFACE"
+	kill_stale
+	log "starting hostapd (unbridged)"
+	setsid hostapd -P "$PIDFILE" "$CONF" >>"$LOG" 2>&1 &
+
+	# wait for AP-ENABLED before bridging
+	n=0
+	while [ "$n" -lt 20 ]; do
+		grep -q "AP-ENABLED" "$LOG" && break
+		grep -q "AP-DISABLED\|Interface initialization failed" "$LOG" && {
+			log "hostapd failed to start -- see $LOG"; return 0; }
+		sleep 1
+		n=$((n + 1))
+	done
+	if grep -q "AP-ENABLED" "$LOG"; then
+		log "hostapd: AP-ENABLED"
+	else
+		log "hostapd: no AP-ENABLED after ${n}s -- see $LOG"
+		return 0
+	fi
+
+	# --- now bridge it: clients inherit the LAN's DHCP/firewall/NAT ---
+	if [ -n "$BRIDGE" ] && [ -d "/sys/class/net/$BRIDGE" ]; then
+		ip link set "$IFACE" master "$BRIDGE"
+		# A bridge port walks disabled -> listening -> learning -> forwarding,
+		# spending forward_delay in each of the last two states, so the wait has
+		# to be twice the bridge's forward_delay plus a margin.  (Measured: with
+		# br-lan's 8 s forward_delay the port reaches forwarding after ~16 s;
+		# waiting only 15 s still catches it in "learning".)
+		fd="$(cat "/sys/class/net/$BRIDGE/bridge/forward_delay" 2>/dev/null)"
+		limit=$(( (${fd:-800} / 100) * 2 + 6 ))
+		[ "$limit" -lt 8 ] && limit=8
+		n=0
+		while [ "$n" -lt "$limit" ]; do
+			[ "$(cat "/sys/class/net/$IFACE/brport/state" 2>/dev/null)" = "3" ] && break
+			sleep 1
+			n=$((n + 1))
+		done
+		log "bridged $IFACE -> $BRIDGE (port state $(cat "/sys/class/net/$IFACE/brport/state" 2>/dev/null) after ${n}s, 3=forwarding)"
+	fi
+
+	log "=== up: ssid=$SSID ch=$CHANNEL iface=$IFACE ==="
+}
+
+stop() {
+	log "=== mt7603u stop ==="
+	IFACE="$(iface_of_mt7603u)"
+	kill_stale
+	if [ -n "$IFACE" ]; then
+		ip link set "$IFACE" nomaster 2>/dev/null
+		ip link set "$IFACE" down 2>/dev/null
+	fi
+	log "stopped"
+}
+
+reload() {
+	stop
+	start
+}
+
+EXTRA_COMMANDS="status"
+EXTRA_HELP="	status	show what the driver and hostapd are doing"
+
+status() {
+	IFACE="$(iface_of_mt7603u)"
+	echo "interface : ${IFACE:-<none: card absent or module not loaded>}"
+	[ -n "$IFACE" ] && {
+		echo "mac       : $(cat /sys/class/net/$IFACE/address 2>/dev/null)"
+		echo "bridge    : $(ls /sys/class/net/$BRIDGE/brif/ 2>/dev/null | tr '\n' ' ')"
+	}
+	echo "module    : $(grep -c "^$MODULE " /proc/modules 2>/dev/null) loaded"
+	echo "hostapd   : $(ps | grep -c '[h]ostapd .*mt7603u') instance(s)"
+	echo "AP state  : $(grep -o 'AP-ENABLED\|AP-DISABLED' "$LOG" 2>/dev/null | tail -1)"
+	echo "log       : $LOG"
+}

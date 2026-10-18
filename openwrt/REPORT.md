@@ -347,6 +347,31 @@ TX 基本一致；OpenWrt 侧 RX 偏低，主要变量是**卡现在直接插在
    实际上 `Match already configured` 来自 `cfg80211_mlme_register_mgmt()`（管理帧注册），
    与信道无关，极易误判成"驱动不支持改信道"。现在统一用 `hostapd -P <pidfile>` 启动、按 PID 清理。
 
+4. **认接口不能按名字，也不能只看 netdev 的 `device/driver`**
+   这台机器上不止一块无线（ath9k 走 PCIe，另外 `rt2800usb`/`rtl8192du` 模块也装着），
+   接口名取决于探测顺序，`wlan0`/`wlan1` 都可能。按驱动认是对的，但要认对**层级**：
+
+   ```
+   /sys/class/net/wlan0/device              -> …/usb3/3-1/3-1.1     ← USB *设备*
+   /sys/class/net/wlan0/device/driver       -> usb                  ← 通用驱动，没用
+   /sys/bus/usb/drivers/mt_drv/3-1.1:1.0    → driver=mt_drv / module=mt7603u_ap  ← 在这层
+   ```
+
+   我们的驱动绑在 netdev 设备的**下一层**（USB 接口），而 `/sys/class/net/<if>/device`
+   指向的是 USB 设备本身，`driver` 只会给出通用的 `usb`。ath9k 是 PCIe、`driver/module`
+   直接可读，所以**朴素的写法在 PCIe 网卡上看着是对的，碰上 USB 网卡必然识别失败**。
+
+   正确做法：遍历 `/sys/bus/usb/drivers/mt_drv/*:*`（驱动自己绑定的接口）→ 取其父设备路径 →
+   找 `device` 路径相同的 netdev 即是我们那块。（本例中 `<interface>/net/` 是空的——
+   厂商驱动没把 netdev 的 parent 设成 USB 接口，所以不能靠 `net/` 反查。）
+
+   实现见 [`../tools/router/mt7603u.init`](../tools/router/mt7603u.init) 的 `iface_of_mt7603u()`。
+
+5. **桥端口要等两次 `forward_delay` 才会转发**
+   `ip link set <if> master br-lan` 之后端口走 disabled → listening → learning → forwarding，
+   在 `br-lan` 的 `forward_delay=800`（8 秒）下约 **17 秒**才到 `state 3`。
+   只等 2 秒就记"已桥接"，客户端其实还过不去；按桥的 `forward_delay` 计算等待时间即可。
+
 可直接复用的脚本：[`../tools/router/bring-up-ap.sh`](../tools/router/bring-up-ap.sh)。
 
 

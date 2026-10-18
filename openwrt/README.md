@@ -168,8 +168,38 @@ ip link set wlan0 master br-lan
 `DHCPACK 192.168.1.196` → `ip neigh` REACHABLE → 能上网；期间原有的 5GHz 上行
 （`phy0-sta0`）ping 0% 丢包，未受影响。
 
-> 以上都**不会**在重启后保留（没有 autoload 条目，hostapd 与桥接都是手工的）。
-> 这是有意为之的安全设计：出问题时断电重启即可回到原状。要固化再往下做 init 脚本。
+### 3c. 固化：一个开机自启的 init 脚本
+
+把上面那套顺序封成一个脚本：[`../tools/router/mt7603u.init`](../tools/router/mt7603u.init)
+
+```sh
+cp tools/router/mt7603u.init /etc/init.d/mt7603u
+chmod 755 /etc/init.d/mt7603u
+/etc/init.d/mt7603u enable        # -> /etc/rc.d/S99mt7603u（开机自启）
+/etc/init.d/mt7603u restart       # 立即可用
+/etc/init.d/mt7603u status        # 看接口/模块/hostapd/AP 状态
+```
+
+脚本做的事与顺序：**自己 modprobe 模块**（不写 `/etc/modules.d/`，便于回退）→
+**按驱动找接口**（不按名字，见下）→ `ip link set up` 跑 `rt28xx_init` →
+删掉 OpenWrt 自动收编的 radio → 无桥起 hostapd（`-P` pidfile）→ 等 `AP-ENABLED` →
+`ip link set master br-lan` 并**等端口进入 forwarding**。
+
+参数在脚本开头（`SSID`/`PSK`/`CHANNEL`/`BRIDGE`/`MODULE`），日志在 `/tmp/mt7603u.log`。
+
+**为什么不能按名字匹配接口**（这台机器上不止一块无线）：
+
+```
+/sys/class/net/wlan0/device          -> …/usb3/3-1/3-1.1    ← USB 设备，driver 只是通用 usb
+/sys/bus/usb/drivers/mt_drv/3-1.1:1.0 → driver=mt_drv / module=mt7603u_ap   ← 驱动绑在这一层
+```
+
+驱动绑在 netdev 设备的**下一层**，所以正确做法是：遍历 `/sys/bus/usb/drivers/mt_drv/*:*`
+取父设备路径，再找 `device` 路径相同的 netdev。这样 `wlan0`/`wlan1` 怎么变、
+ath9k 与其它 USB 网卡在不在，都不会误伤。
+
+`stop` 会杀掉 hostapd、把接口移出桥并 down 掉；因为不写 UCI 网络配置，
+`/etc/init.d/mt7603u disable` + 重启即可完全回到未启用状态。
 
 ---
 
