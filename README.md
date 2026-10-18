@@ -19,8 +19,8 @@ This fork keeps that tree and its layout, and adds:
   the USB stick through, so the driver can be tested without touching a router.
 * **The Debian/Armbian bring-up** (`docs/debian-bringup/`) — the earlier
   from-scratch port to Linux 6.12 / 6.18, its two arm64-only runtime bugs, the
-  RX-throughput mystery, and the prebuilt x86_64 modules
-  (`dist/debian-x86_64-6.12.101/`).
+  RX-throughput mystery, and the prebuilt modules (x86_64 + aarch64)
+  (`dist/debian-x86_64-6.12.101/`, `dist/armbian-aarch64-6.18.54/`).
 
 `git diff upstream:master` is the port. Nothing else in `DPOA/` was touched.
 
@@ -32,7 +32,7 @@ openwrt/package/kernel/mt7603u/
                            kmod-mt7603u-ap / -sta / mt7603u-files
 openwrt/REPORT.md, README.md   the OpenWrt port: pitfalls, evidence, how-to
 docs/debian-bringup/       the Debian/Armbian port: full report + notes
-dist/                      prebuilt ipks (OpenWrt) and .ko (Debian 6.12.101)
+dist/                      prebuilt ipks (OpenWrt) + .ko (Debian 6.12.101, Armbian 6.18.54)
 tools/                     QEMU harness (OpenWrt) + build/run helpers (Debian)
 ```
 

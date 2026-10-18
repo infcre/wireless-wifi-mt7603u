@@ -34,6 +34,9 @@ rather than reverse-engineering a driver, so it is kept here.
   the two modules that were verified on that box, stripped, with the
   compatibility caveat spelled out (Debian has `CONFIG_MODVERSIONS=y`, so they
   load only on that exact kernel release).
+* [`../../dist/armbian-aarch64-6.18.54/`](../../dist/armbian-aarch64-6.18.54/) —
+  the aarch64 STA module from the Armbian board, i.e. the build that contains the
+  two arm64-only fixes described above.
 * [`../../tools/debian/build.sh`](../../tools/debian/build.sh) — rebuild them for
   *your* kernel; the same script is what was used on Armbian (aarch64), since the
   driver is architecture-independent.
@@ -44,13 +47,11 @@ rather than reverse-engineering a driver, so it is kept here.
 
 ## Not included
 
-* **A prebuilt aarch64 module.**  The module for Armbian
-  (`6.18.54-ophub`, Amlogic S905L3B) is on a box that is currently offline, so
-  only the build script is here.  If you want it, bring the box up and run
-  `tools/debian/build.sh` there — it is the same command.
 * **The ~60 throwaway measurement scripts** from the bring-up (per-run
   association/policy-routing/throughput probes).  They were written against one
   specific LAN and are not useful without it; the report keeps their findings.
+* **An AP-mode build for aarch64.**  That board was only used as a station, so
+  only the STA module exists; `tools/debian/build.sh ap` builds one if needed.
 
 ## The one-line relationship to the OpenWrt port
 
