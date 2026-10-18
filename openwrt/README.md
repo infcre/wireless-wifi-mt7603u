@@ -201,6 +201,28 @@ ath9k 与其它 USB 网卡在不在，都不会误伤。
 `stop` 会杀掉 hostapd、把接口移出桥并 down 掉；因为不写 UCI 网络配置，
 `/etc/init.d/mt7603u disable` + 重启即可完全回到未启用状态。
 
+> **启用自启后要留意的取舍**：脚本会在开机时 `modprobe`，所以"出问题断电重启就回到原状"
+> 这条退路就没有了——如果模块在 boot 阶段卡住内核，每次开机都会重演。
+> 该路径在本机已成功多次（含 kmodloader 自动加载），但风险无法归零。
+> 因此上生产前请确认**你能物理接触这台机器**，并记住下面的恢复办法。
+
+#### 如果重启后没回来
+
+1. **failsafe 模式**（首选）：OpenWrt 的 failsafe 不执行 `/etc/init.d`，
+   所以进得去就能把它关掉：
+   ```
+   # 启动时在 GRUB 选 "OpenWrt (failsafe)"，或按提示进入 failsafe
+   mount_root
+   /etc/init.d/mt7603u disable      # 或 rm /etc/rc.d/S99mt7603u
+   reboot
+   ```
+   x86 镜像的 GRUB 菜单里本来就有 `OpenWrt (failsafe)` 这一项。
+2. **把盘挂到别的机器上**删掉 `/etc/rc.d/S99mt7603u`（等价，且不需要进系统）。
+3. 确认恢复后，可以先只手工跑 `/etc/init.d/mt7603u start`（观察 `/tmp/mt7603u.log`），
+   确认稳定再重新 `enable`。
+
+脚本本身对"没有卡"是安全的：找不到 netdev 就记一行日志后退出，不会卡启动。
+
 ---
 
 ## 4. 用 STA 模式
