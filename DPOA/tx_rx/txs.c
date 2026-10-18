@@ -71,6 +71,10 @@ INT32 UAPSDTxSHandler(RTMP_ADAPTER *pAd, CHAR *Data, UINT32 Priv)
 		DBGPRINT(RT_DEBUG_TRACE, ("uapsd> [new] TxS close SP ()!\n"));
 
 	}
+
+	/* Declared INT32 (registered as a TXS_HANDLER); GCC 14 rejects falling
+	 * off the end of a non-void function (-Werror=return-type). */
+	return 0;
 }
 #endif
 INT32 BcnTxSHandler(RTMP_ADAPTER *pAd, CHAR *Data, UINT32 Priv)
@@ -105,7 +109,9 @@ INT32 BcnTxSHandler(RTMP_ADAPTER *pAd, CHAR *Data, UINT32 Priv)
 			if (pMbss->timer_loop >= MAX_TIME_RECORD)
 				pMbss->timer_loop = 0;
 
-			return;
+			/* BcnTxSHandler returns INT32; bare `return` is rejected by
+			 * GCC 14 (-Wreturn-mismatch). */
+			return 0;
 		}
 #endif /* CONFIG_AP_SUPPORT */
 #ifdef CONFIG_STA_SUPPORT
@@ -115,10 +121,17 @@ INT32 BcnTxSHandler(RTMP_ADAPTER *pAd, CHAR *Data, UINT32 Priv)
 			MakeIbssBeacon(pAd);
 		}
 #endif /* CONFIG_STA_SUPPORT */
+
+	/* INT32 function: the paths above do not all return. */
+	return 0;
 }
 
 
-INT32 PsDataTxSHandler(RTMP_ADAPTER *pAd, CHAR *Data)
+/* Signature must match TXS_HANDLER (include/mac/mac_mt/mt_mac.h):
+ *   INT32 (*)(RTMP_ADAPTER *pAd, CHAR *Data, UINT32 Priv)
+ * Priv is unused here, but omitting it made the function incompatible with
+ * the handler type it is registered as. */
+INT32 PsDataTxSHandler(RTMP_ADAPTER *pAd, CHAR *Data, UINT32 Priv)
 {
 	TXS_STRUC *txs_entry = (TXS_STRUC *)Data;
 	TXS_D_3 *txs_d3 = &txs_entry->txs_d3;
@@ -532,7 +545,9 @@ INT32 ParseTxSPacket(RTMP_ADAPTER *pAd, UINT32 Pid, UINT8 Format, CHAR *Data)
 	{
 		DBGPRINT(RT_DEBUG_ERROR, ("%s ==> Ignore this TxValid\n", __FUNCTION__));
 		DumpTxSFormat(pAd, Format, Data);
-		return;
+		/* ParseTxSPacket returns INT32; bare `return` is rejected by
+		 * GCC 14 (-Wreturn-mismatch). */
+		return 0;
 	}
 
 	RemoveTxSStatus(pAd, Pid, &Type, &PktPid, &PktType, &PktSubType, &TxRate, &Priv);
@@ -637,5 +652,9 @@ INT32 RemoveTxSStatus(RTMP_ADAPTER *pAd, UINT8 TxSPid, UINT8 *Type, UINT8 *PktPi
 	*PktSubType = TxSCtl->TxSStatus[TxSPid].PktSubType;
 	*TxRate = TxSCtl->TxSStatus[TxSCtl->TxSPid].TxRate;
 	*TxSPriv = TxSCtl->TxSStatus[TxSPid].Priv;
+
+	/* Declared INT32 but the body only fills out-params; GCC 14 rejects
+	 * falling off the end (-Werror=return-type). */
+	return 0;
 }
 

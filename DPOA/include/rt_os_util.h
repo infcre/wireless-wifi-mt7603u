@@ -826,6 +826,16 @@ VOID CFG80211OS_ScanEnd(
 	IN VOID						*pCB,
 	IN BOOLEAN					FlgIsAborted);
 
+/*
+ * AP-only builds have no scan engine, but hostapd will not start an HT40 AP on
+ * 2.4 GHz until a neighbouring-BSS scan has succeeded. These two provide an
+ * "empty scan" so that pre-check can pass. See the long note in
+ * os/linux/cfg80211/cfg80211_util.c for the caveats.
+ */
+struct cfg80211_scan_request;
+INT CFG80211OS_APNoScanStart(struct cfg80211_scan_request *pRequest);
+VOID CFG80211OS_APNoScanFlush(VOID);
+
 void CFG80211OS_ConnectResultInform(
 	IN VOID						*pCB,
 	IN UCHAR					*pBSSID,

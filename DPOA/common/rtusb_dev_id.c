@@ -34,7 +34,15 @@
 USB_DEVICE_ID rtusb_dev_id[] = {
 
 #ifdef MT7603
-	{USB_DEVICE(0x0E8D,0x7603)},
+	{USB_DEVICE(0x0E8D,0x7603)},	/* MediaTek MT7603U reference PID */
+	/* 0x760C is the 360-branded MT7603U ("360随身WiFi 3代"). The Windows
+	 * driver identifies it through the dedicated hardware section
+	 * OS61_MTKWLAN_7603_360.ndi in mtkwlux.inf:
+	 *     %Generic.DeviceDesc% = OS61_MTKWLAN_7603_360.ndi, USB\VID_0E8D&PID_760C
+	 * Without this entry the probe never runs and the device stays
+	 * unclaimed (the mainline mt7601u driver cannot take it either: it only
+	 * matches 148F:760C and rejects anything whose ASIC rev is not 0x7601). */
+	{USB_DEVICE(0x0E8D,0x760C)},
 #endif
 	{ }/* Terminating entry */
 };

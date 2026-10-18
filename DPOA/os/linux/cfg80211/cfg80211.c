@@ -190,7 +190,15 @@ static INT32 CFG80211_RegNotifier(
 #endif /* LINUX_VERSION_CODE */
 
 
-/* get RALINK pAd control block in 80211 Ops */
+/* get RALINK pAd control block in 80211 Ops.
+ *
+ * This macro used to `return -EINVAL` when the lookup failed, which only
+ * compiles when the enclosing function returns int. Some cfg80211 callbacks
+ * (e.g. mgmt_frame_register / update_mgmt_frame_registrations) return void,
+ * and GCC 14 rejects a value-return in a void function (-Wreturn-mismatch).
+ *
+ * The macro now only assigns and logs; callers that return int already check
+ * for NULL themselves. */
 #define MAC80211_PAD_GET(__pAd, __pWiphy)							\
 	{																\
 		ULONG *__pPriv;												\
@@ -200,7 +208,6 @@ static INT32 CFG80211_RegNotifier(
 		{															\
 			DBGPRINT(RT_DEBUG_ERROR,								\
 					("80211> %s but pAd = NULL!", __FUNCTION__));	\
-			return -EINVAL;											\
 		}															\
 	}
 
@@ -680,7 +687,14 @@ static int CFG80211_OpsScan(
 	return 0;
 
 #else 
-	return -EOPNOTSUPP;
+	/*
+		AP-only build: the scan engine is compiled out, so a real scan is
+		impossible. hostapd still insists on a successful neighbouring-BSS
+		scan before it will enable HT40 on 2.4 GHz, so satisfy that
+		pre-check with an immediate empty scan result instead of failing
+		the request. See CFG80211OS_APNoScanStart() for the caveats.
+	*/
+	return CFG80211OS_APNoScanStart(pRequest);
 #endif /* CONFIG_STA_SUPPORT */
 } 
 #endif /* LINUX_VERSION_CODE */
@@ -953,8 +967,11 @@ static int CFG80211_OpsStaGet(
 	if (StaInfo.TxRateFlags != RT_CMD_80211_TXRATE_LEGACY)
 	{
 		pSinfo->txrate.flags = RATE_INFO_FLAGS_MCS;
-		if (StaInfo.TxRateFlags & RT_CMD_80211_TXRATE_BW_40)
-			pSinfo->txrate.flags |= RATE_INFO_FLAGS_40_MHZ_WIDTH;
+		/* Bandwidth moved out of rate_info.flags into its own
+		 * enum rate_info_bw / rate_info.bw field in Linux 4.1;
+		 * RATE_INFO_FLAGS_40_MHZ_WIDTH no longer exists. */
+		pSinfo->txrate.bw = (StaInfo.TxRateFlags & RT_CMD_80211_TXRATE_BW_40) ?
+					RATE_INFO_BW_40 : RATE_INFO_BW_20;
 
 		if (StaInfo.TxRateFlags & RT_CMD_80211_TXRATE_SHORT_GI)
 			pSinfo->txrate.flags |= RATE_INFO_FLAGS_SHORT_GI;
@@ -967,39 +984,39 @@ static int CFG80211_OpsStaGet(
 		pSinfo->txrate.legacy = StaInfo.TxRateMCS;
 	} 
 
-	pSinfo->filled |= STATION_INFO_TX_BITRATE;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_TX_BITRATE; */
 
 	/* fill signal */
 	pSinfo->signal = StaInfo.Signal;
-	pSinfo->filled |= STATION_INFO_SIGNAL;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_SIGNAL; */
 
 #ifdef CONFIG_AP_SUPPORT
 	/* fill tx count */
 	pSinfo->tx_packets = StaInfo.TxPacketCnt;
-	pSinfo->filled |= STATION_INFO_TX_PACKETS;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_TX_PACKETS; */
 
 	/* fill inactive time */
 	pSinfo->inactive_time = StaInfo.InactiveTime;
-	pSinfo->filled |= STATION_INFO_INACTIVE_TIME;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_INACTIVE_TIME; */
 #endif /* CONFIG_AP_SUPPORT */
 
 #ifdef CONFIG_STA_SUPPORT
 	/* fill tx/rx count */
 	pSinfo->tx_packets = StaInfo.tx_packets;
-	pSinfo->filled |= STATION_INFO_TX_PACKETS;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_TX_PACKETS; */
 
 	pSinfo->tx_retries = StaInfo.tx_retries;
-	pSinfo->filled |= STATION_INFO_TX_RETRIES;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_TX_RETRIES; */
 
 	pSinfo->tx_failed = StaInfo.tx_failed;
-	pSinfo->filled |= STATION_INFO_TX_FAILED;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_TX_FAILED; */
 
 	pSinfo->rx_packets = StaInfo.rx_packets;
-	pSinfo->filled |= STATION_INFO_RX_PACKETS;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_RX_PACKETS; */
 
 	/* fill inactive time */
 	pSinfo->inactive_time = StaInfo.InactiveTime;
-	pSinfo->filled |= STATION_INFO_INACTIVE_TIME;
+	/* removed in Linux 4.0: pSinfo->filled |= STATION_INFO_INACTIVE_TIME; */
 #endif /* CONFIG_STA_SUPPORT */
 
 	return 0;
@@ -1077,11 +1094,21 @@ static int CFG80211_OpsWiphyParamsSet(
 	MAC80211_PAD_GET(pAd, pWiphy);
 	if (Changed & WIPHY_PARAM_RTS_THRESHOLD)
 	{
-		RTMP_DRIVER_80211_RTS_THRESHOLD_ADD(pAd, pWiphy->rts_threshold);
+		/* The *_THRESHOLD_ADD macros forward their second argument
+		 * through pData (void *), but the receiving handlers
+		 * (CFG80211DRV_RtsThresholdAdd / _FragThresholdAdd) take the
+		 * threshold BY VALUE. Passing the integer straight in only ever
+		 * worked by implicit truncation on 32-bit; pass its address
+		 * instead. */
+		UINT32 rts = (UINT32)pWiphy->rts_threshold;
+
+		RTMP_DRIVER_80211_RTS_THRESHOLD_ADD(pAd, &rts);
 		CFG80211DBG(RT_DEBUG_TRACE, ("80211> %s ==> rts_threshold(%d)\n", __FUNCTION__,pWiphy->rts_threshold));
 		return 0;		
 	} else if (Changed & WIPHY_PARAM_FRAG_THRESHOLD) {
-		RTMP_DRIVER_80211_FRAG_THRESHOLD_ADD(pAd, pWiphy->frag_threshold);
+		UINT32 frag = (UINT32)pWiphy->frag_threshold;
+
+		RTMP_DRIVER_80211_FRAG_THRESHOLD_ADD(pAd, &frag);
 		CFG80211DBG(RT_DEBUG_TRACE, ("80211> %s ==> frag_threshold(%d)\n", __FUNCTION__,pWiphy->frag_threshold));
 		return 0;		
 	}
@@ -1771,10 +1798,12 @@ static int CFG80211_OpsSurveyGet(
 
 	/* return the information to upper layer */
 	pSurvey->channel = ((CFG80211_CB *)(SurveyInfo.pCfg80211))->pCfg80211_Channels;
-	pSurvey->filled = SURVEY_INFO_CHANNEL_TIME_BUSY |
-						SURVEY_INFO_CHANNEL_TIME_EXT_BUSY;
-	pSurvey->channel_time_busy = SurveyInfo.ChannelTimeBusy; /* unit: us */
-	pSurvey->channel_time_ext_busy = SurveyInfo.ChannelTimeExtBusy;
+	/* struct survey_info field names lost their CHANNEL_ prefix in Linux 4.0:
+	 * channel_time_busy -> time_busy, channel_time_ext_busy -> time_ext_busy. */
+	pSurvey->filled = SURVEY_INFO_TIME_BUSY |
+						SURVEY_INFO_TIME_EXT_BUSY;
+	pSurvey->time_busy = SurveyInfo.ChannelTimeBusy; /* unit: us */
+	pSurvey->time_ext_busy = SurveyInfo.ChannelTimeExtBusy;
 
 	CFG80211DBG(RT_DEBUG_TRACE, ("80211> busy time = %ld %ld\n",
 				(ULONG)SurveyInfo.ChannelTimeBusy,
@@ -1941,7 +1970,9 @@ static int CFG80211_OpsRemainOnChannel(
 	dev = pWdev->netdev;	
 #endif /* LINUX_VERSION_CODE: 3.6.0 */
 
-	rndCookie = random32() | 1;	
+	/* random32() was renamed to prandom_u32() in Linux 4.14 and the prandom
+	 * helpers were deprecated in favour of the get_random_u32() API. */
+	rndCookie = get_random_u32() | 1;	
 
 	CFG80211DBG(RT_DEBUG_TRACE, ("80211> %s ==>\n", __FUNCTION__));
 
@@ -2719,6 +2750,89 @@ ra_iface_combinations_p2p[] = {
 };
 #endif /* LINUX_VERSION_CODE: 3.8.0 */
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+/* Forward declarations for the cfg80211 op adapters, whose definitions appear
+ * after the ops table below. */
+/* These two wrap functions that live inside #ifdef CONFIG_AP_SUPPORT, so the
+ * adapters must carry the same guard -- a STA-only build has no
+ * CFG80211_OpsChangeBeacon / CFG80211_OpsStopAp at all. */
+#ifdef CONFIG_AP_SUPPORT
+static int CFG80211_OpsChangeBeacon_Compat(struct wiphy *wiphy,
+					   struct net_device *dev,
+					   struct cfg80211_ap_update *info);
+static int CFG80211_OpsStopAp_Compat(struct wiphy *wiphy,
+				     struct net_device *dev,
+				     unsigned int link_id);
+#endif /* CONFIG_AP_SUPPORT */
+static int CFG80211_OpsVirtualInfChg_Compat(struct wiphy *wiphy,
+					    struct net_device *dev,
+					    enum nl80211_iftype type,
+					    struct vif_params *params);
+static int CFG80211_OpsKeyAdd_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, int link_id,
+				     u8 key_index, bool pairwise,
+				     const u8 *mac_addr,
+				     struct key_params *params);
+static int CFG80211_OpsKeyGet_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, int link_id,
+				     u8 key_index, bool pairwise,
+				     const u8 *mac_addr, void *cookie,
+				     void (*callback)(void *cookie,
+						      struct key_params *));
+static int CFG80211_OpsKeyDel_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, int link_id,
+				     u8 key_index, bool pairwise,
+				     const u8 *mac_addr);
+static int CFG80211_OpsKeyDefaultSet_Compat(struct wiphy *wiphy,
+					    struct net_device *dev,
+					    int link_id, u8 key_index,
+					    bool unicast, bool multicast);
+#ifdef DOT11W_PMF_SUPPORT
+static int CFG80211_OpsMgmtKeyDefaultSet_Compat(struct wiphy *wiphy,
+						RTMP_CFG80211_WDEV_ARG,
+						int link_id, u8 key_index);
+#endif
+static int CFG80211_OpsStaDel_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG,
+				     struct station_del_parameters *params);
+#ifdef RTMP_CFG80211_COOKIE_BY_VALUE
+static int CFG80211_OpsMgmtTx_Compat(struct wiphy *wiphy,
+				     struct wireless_dev *wdev,
+				     struct cfg80211_mgmt_tx_params *params,
+				     u64 cookie);
+#else
+static int CFG80211_OpsMgmtTx_Compat(struct wiphy *wiphy,
+				     struct wireless_dev *wdev,
+				     struct cfg80211_mgmt_tx_params *params,
+				     u64 *cookie);
+#endif
+static void CFG80211_OpsUpdateMgmtFrameRegs_Compat(struct wiphy *wiphy,
+						   struct wireless_dev *wdev,
+						   struct mgmt_frame_regs *upd);
+static int CFG80211_OpsStaGet_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, const u8 *mac,
+				     struct station_info *sinfo);
+static int CFG80211_OpsStaDump_Compat(struct wiphy *wiphy,
+				      RTMP_CFG80211_WDEV_ARG, int idx,
+				      u8 *mac, struct station_info *sinfo);
+static int CFG80211_OpsStaAdd_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, const u8 *mac,
+				     struct station_parameters *params);
+static int CFG80211_OpsStaChg_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, const u8 *mac,
+				     struct station_parameters *params);
+#ifdef RTMP_CFG80211_COOKIE_BY_VALUE
+/* 6.14 added `int radio_idx` to set_wiphy_params and `const u8 *rx_addr` to
+ * remain_on_channel. */
+static int CFG80211_OpsWiphyParamsSet_Compat(struct wiphy *wiphy, int radio_idx,
+					     u32 changed);
+static int CFG80211_OpsRemainOnChannel_Compat(
+	struct wiphy *wiphy, struct wireless_dev *wdev,
+	struct ieee80211_channel *chan, unsigned int duration, u64 cookie,
+	const u8 *rx_addr);
+#endif
+#endif /* LINUX_VERSION_CODE >= 6.0.0 */
+
 struct cfg80211_ops CFG80211_Ops = {
 #ifdef CFG_TDLS_SUPPORT
 	.tdls_mgmt = CFG80211_OpsTdlsMgmt,
@@ -2730,9 +2844,15 @@ struct cfg80211_ops CFG80211_Ops = {
 	.add_beacon	= CFG80211_OpsAddBeacon,
 	.del_beacon	= CFG80211_OpsDelBeacon,
 #else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	.start_ap	    = CFG80211_OpsStartAp,
+	.change_beacon	= CFG80211_OpsChangeBeacon_Compat,
+	.stop_ap	    = CFG80211_OpsStopAp_Compat,
+#else
 	.start_ap	    = CFG80211_OpsStartAp,
 	.change_beacon	= CFG80211_OpsChangeBeacon,
 	.stop_ap	    = CFG80211_OpsStopAp,
+#endif /* LINUX_VERSION_CODE 6.0 */
 #endif	/* LINUX_VERSION_CODE 3.4 */
 #endif /* CONFIG_AP_SUPPORT */
 	/* set channel for a given wireless interface */
@@ -2745,7 +2865,11 @@ struct cfg80211_ops CFG80211_Ops = {
 #endif /* LINUX_VERSION_CODE: 3.8.0 */
 
 	/* change type/configuration of virtual interface */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	.change_virtual_intf		= CFG80211_OpsVirtualInfChg_Compat,
+#else
 	.change_virtual_intf		= CFG80211_OpsVirtualInfChg,
+#endif
 #ifdef RT_CFG80211_P2P_CONCURRENT_DEVICE	
 	.add_virtual_intf           = CFG80211_OpsVirtualInfAdd,
 	.del_virtual_intf           = CFG80211_OpsVirtualInfDel,
@@ -2783,12 +2907,37 @@ struct cfg80211_ops CFG80211_Ops = {
 #endif /* LINUX_VERSION_CODE: 3.8.0 */	
 	/* configure WLAN power management */
 	.set_power_mgmt				= CFG80211_OpsPwrMgmt,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	/* get station information for the station identified by @mac */
+	.get_station				= CFG80211_OpsStaGet_Compat,
+#else
 	/* get station information for the station identified by @mac */
 	.get_station				= CFG80211_OpsStaGet,
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	/* dump station callback (adapter copes with 6.13's wireless_dev arg) */
+	.dump_station				= CFG80211_OpsStaDump_Compat,
+#else
 	/* dump station callback */
 	.dump_station				= CFG80211_OpsStaDump,
+#endif
 	/* notify that wiphy parameters have changed */
+#ifdef RTMP_CFG80211_COOKIE_BY_VALUE
+	/* 6.14 inserted `int radio_idx` as the 2nd argument */
+	.set_wiphy_params			= CFG80211_OpsWiphyParamsSet_Compat,
+#else
 	.set_wiphy_params			= CFG80211_OpsWiphyParamsSet,
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	/* add a key with the given parameters */
+	.add_key					= CFG80211_OpsKeyAdd_Compat,
+	/* get information about the key with the given parameters */
+	.get_key					= CFG80211_OpsKeyGet_Compat,
+	/* remove a key given the @mac_addr */
+	.del_key					= CFG80211_OpsKeyDel_Compat,
+	/* set the default key on an interface */
+	.set_default_key			= CFG80211_OpsKeyDefaultSet_Compat,
+#else
 	/* add a key with the given parameters */
 	.add_key					= CFG80211_OpsKeyAdd,
 	/* get information about the key with the given parameters */
@@ -2797,9 +2946,14 @@ struct cfg80211_ops CFG80211_Ops = {
 	.del_key					= CFG80211_OpsKeyDel,
 	/* set the default key on an interface */
 	.set_default_key			= CFG80211_OpsKeyDefaultSet,
+#endif
 #ifdef DOT11W_PMF_SUPPORT
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	.set_default_mgmt_key		= CFG80211_OpsMgmtKeyDefaultSet_Compat,
+#else
 	.set_default_mgmt_key		= CFG80211_OpsMgmtKeyDefaultSet,
+#endif
 #endif /* LINUX_VERSION_CODE */
 #endif /* DOT11W_PMF_SUPPORT */
 
@@ -2831,14 +2985,23 @@ struct cfg80211_ops CFG80211_Ops = {
 		channel for the specified duration to complete an off-channel
 		operation (e.g., public action frame exchange).
 	*/
+#ifdef RTMP_CFG80211_COOKIE_BY_VALUE
+	/* 6.14 appended `const u8 *rx_addr` and moved the cookie to by-value */
+	.remain_on_channel			= CFG80211_OpsRemainOnChannel_Compat,
+#else
 	.remain_on_channel			= CFG80211_OpsRemainOnChannel,
+#endif
 	/* cancel an on-going remain-on-channel operation */
 	.cancel_remain_on_channel	=  CFG80211_OpsCancelRemainOnChannel,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37))
 	/* transmit an action frame */
 	.action						= NULL,
 #else 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	.mgmt_tx                    = CFG80211_OpsMgmtTx_Compat,
+#else
 	.mgmt_tx                    = CFG80211_OpsMgmtTx,
+#endif
 #endif /* LINUX_VERSION_CODE */
 #endif /* LINUX_VERSION_CODE */
 
@@ -2853,8 +3016,14 @@ struct cfg80211_ops CFG80211_Ops = {
 #endif /* LINUX_VERSION_CODE */
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,37))
-	/* notify driver that a management frame type was registered */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	/* notify driver that a management frame type was registered.
+	 * Renamed to update_mgmt_frame_registrations, which reports a bitmap
+	 * instead of a single (frame_type, reg) pair. */
+	.update_mgmt_frame_registrations = CFG80211_OpsUpdateMgmtFrameRegs_Compat,
+#else
 	.mgmt_frame_register		= CFG80211_OpsMgmtFrameRegister,
+#endif
 #endif /* LINUX_VERSION_CODE : 2.6.37 */
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,38))
@@ -2864,11 +3033,231 @@ struct cfg80211_ops CFG80211_Ops = {
 	.get_antenna				= NULL,
 #endif /* LINUX_VERSION_CODE */
 	.change_bss                             = CFG80211_OpsChangeBss,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	.del_station                            = CFG80211_OpsStaDel_Compat, 
+	.add_station                            = CFG80211_OpsStaAdd_Compat,
+	.change_station                         = CFG80211_OpsStaChg_Compat,
+#else
 	.del_station                            = CFG80211_OpsStaDel, 
 	.add_station                            = CFG80211_OpsStaAdd,
 	.change_station                         = CFG80211_OpsStaChg,
+#endif
 //	.set_bitrate_mask                       = CFG80211_OpsBitrateSet,
 };
+
+/* ===========================================================================
+ * cfg80211 ops adapters for modern kernels.
+ *
+ * Between 3.10 and 6.12 several cfg80211 operation signatures changed. The
+ * driver's own handlers above are kept as-is; the thunks below present them
+ * with the current signature. Each one is a pure argument shift, except where
+ * noted.
+ * ======================================================================== */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+
+#ifdef CONFIG_AP_SUPPORT
+/* change_beacon(dev, struct cfg80211_ap_update *) -> (dev, beacon_data *).
+ * The beacon payload now lives in ap_update.beacon, and the FT-payload that
+ * the driver used to read off beacon_data moved to .ftm_responder handling. */
+static int CFG80211_OpsChangeBeacon_Compat(struct wiphy *wiphy,
+					   struct net_device *dev,
+					   struct cfg80211_ap_update *info)
+{
+	return CFG80211_OpsChangeBeacon(wiphy, dev, &info->beacon);
+}
+
+/* stop_ap(dev, unsigned int link_id) */
+static int CFG80211_OpsStopAp_Compat(struct wiphy *wiphy,
+				     struct net_device *dev,
+				     unsigned int link_id)
+{
+	return CFG80211_OpsStopAp(wiphy, dev);
+}
+#endif /* CONFIG_AP_SUPPORT */
+
+/* change_virtual_intf(dev, type, struct vif_params *).
+ * The driver's middle argument is UINT32 *pFlags, whose only use is
+ * MONITOR_FLAG_* for a monitor vif; core no longer passes flags here (use
+ * cfg80211_monitor_start_xmit's radiotap handling instead). */
+static int CFG80211_OpsVirtualInfChg_Compat(struct wiphy *wiphy,
+					    struct net_device *dev,
+					    enum nl80211_iftype type,
+					    struct vif_params *params)
+{
+	UINT32 flags = 0;
+
+	return CFG80211_OpsVirtualInfChg(wiphy, dev, type, &flags, params);
+}
+
+/* `int link_id` was inserted as the 3rd argument of the key operations.
+ * RTMP_CFG80211_WDEV_ARG is `struct wireless_dev *wdev` on >= 6.13 and
+ * `struct net_device *wdev` before that (see rt_6x_compat.h section 19). */
+static int CFG80211_OpsKeyAdd_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, int link_id,
+				     u8 key_index, bool pairwise,
+				     const u8 *mac_addr,
+				     struct key_params *params)
+{
+	return CFG80211_OpsKeyAdd(wiphy, RTMP_CFG80211_NDEV_OF(wdev),
+				  key_index, pairwise, mac_addr, params);
+}
+
+static int CFG80211_OpsKeyGet_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, int link_id,
+				     u8 key_index, bool pairwise,
+				     const u8 *mac_addr, void *cookie,
+				     void (*callback)(void *cookie,
+						      struct key_params *))
+{
+	return CFG80211_OpsKeyGet(wiphy, RTMP_CFG80211_NDEV_OF(wdev),
+				  key_index, pairwise, mac_addr, cookie,
+				  callback);
+}
+
+static int CFG80211_OpsKeyDel_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, int link_id,
+				     u8 key_index, bool pairwise,
+				     const u8 *mac_addr)
+{
+	return CFG80211_OpsKeyDel(wiphy, RTMP_CFG80211_NDEV_OF(wdev),
+				  key_index, pairwise, mac_addr);
+}
+
+static int CFG80211_OpsKeyDefaultSet_Compat(struct wiphy *wiphy,
+					    struct net_device *dev,
+					    int link_id, u8 key_index,
+					    bool unicast, bool multicast)
+{
+	return CFG80211_OpsKeyDefaultSet(wiphy, dev, key_index, unicast,
+					 multicast);
+}
+
+#ifdef DOT11W_PMF_SUPPORT
+/* Only built when the driver's PMF support is enabled: the underlying
+ * CFG80211_OpsMgmtKeyDefaultSet is gated the same way. */
+static int CFG80211_OpsMgmtKeyDefaultSet_Compat(struct wiphy *wiphy,
+						RTMP_CFG80211_WDEV_ARG,
+						int link_id, u8 key_index)
+{
+	return CFG80211_OpsMgmtKeyDefaultSet(wiphy,
+					     RTMP_CFG80211_NDEV_OF(wdev),
+					     key_index);
+}
+#endif /* DOT11W_PMF_SUPPORT */
+
+/* del_station now takes a station_del_parameters instead of a bare MAC. */
+static int CFG80211_OpsStaDel_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG,
+				     struct station_del_parameters *params)
+{
+	return CFG80211_OpsStaDel(wiphy, RTMP_CFG80211_NDEV_OF(wdev),
+				  (UINT8 *)params->mac);
+}
+
+/* mgmt_tx(dev, struct cfg80211_mgmt_tx_params *, u64 *cookie).
+ * The old parameter list is now unpacked from `params`; 6.14 also turned the
+ * cookie into a by-value input, so on those kernels it is handed to the driver
+ * through a local the driver's write-back lands in. */
+#ifdef RTMP_CFG80211_COOKIE_BY_VALUE
+static int CFG80211_OpsMgmtTx_Compat(struct wiphy *wiphy,
+				     struct wireless_dev *wdev,
+				     struct cfg80211_mgmt_tx_params *params,
+				     u64 cookie)
+{
+	u64 local_cookie = cookie;
+
+	return CFG80211_OpsMgmtTx(wiphy, wdev, params->chan, params->offchan,
+				  params->wait, params->buf, params->len,
+				  params->no_cck, params->dont_wait_for_ack,
+				  &local_cookie);
+}
+#else
+static int CFG80211_OpsMgmtTx_Compat(struct wiphy *wiphy,
+				     struct wireless_dev *wdev,
+				     struct cfg80211_mgmt_tx_params *params,
+				     u64 *cookie)
+{
+	return CFG80211_OpsMgmtTx(wiphy, wdev, params->chan, params->offchan,
+				  params->wait, params->buf, params->len,
+				  params->no_cck, params->dont_wait_for_ack,
+				  cookie);
+}
+#endif /* RTMP_CFG80211_COOKIE_BY_VALUE */
+
+/* mgmt_frame_register -> update_mgmt_frame_registrations.
+ * The driver only cares about whether probe requests are registered; keep the
+ * same behaviour by feeding it the PROBE_REQ bit from the new bitmap. */
+static void CFG80211_OpsUpdateMgmtFrameRegs_Compat(struct wiphy *wiphy,
+						   struct wireless_dev *wdev,
+						   struct mgmt_frame_regs *upd)
+{
+	UINT16 frame_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_REQ;
+	bool reg = !!(upd->interface_stypes & BIT(IEEE80211_STYPE_PROBE_REQ >> 4));
+
+	CFG80211_OpsMgmtFrameRegister(wiphy, wdev, frame_type, reg);
+}
+
+/* get_station / dump_station / add_station / change_station gained const on
+ * their MAC argument, and on >= 6.13 they receive a wireless_dev instead of a
+ * net_device. */
+static int CFG80211_OpsStaGet_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, const u8 *mac,
+				     struct station_info *sinfo)
+{
+	return CFG80211_OpsStaGet(wiphy, RTMP_CFG80211_NDEV_OF(wdev),
+				  (UINT8 *)mac, sinfo);
+}
+
+static int CFG80211_OpsStaDump_Compat(struct wiphy *wiphy,
+				      RTMP_CFG80211_WDEV_ARG, int idx,
+				      u8 *mac, struct station_info *sinfo)
+{
+	return CFG80211_OpsStaDump(wiphy, RTMP_CFG80211_NDEV_OF(wdev), idx,
+				   mac, sinfo);
+}
+
+static int CFG80211_OpsStaAdd_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, const u8 *mac,
+				     struct station_parameters *params)
+{
+	return CFG80211_OpsStaAdd(wiphy, RTMP_CFG80211_NDEV_OF(wdev),
+				  (UINT8 *)mac, params);
+}
+
+static int CFG80211_OpsStaChg_Compat(struct wiphy *wiphy,
+				     RTMP_CFG80211_WDEV_ARG, const u8 *mac,
+				     struct station_parameters *params)
+{
+	return CFG80211_OpsStaChg(wiphy, RTMP_CFG80211_NDEV_OF(wdev),
+				  (UINT8 *)mac, params);
+}
+
+#ifdef RTMP_CFG80211_COOKIE_BY_VALUE
+/* 6.14 added `int radio_idx` to set_wiphy_params.  The driver has a single
+ * radio, so the index carries no information for it. */
+static int CFG80211_OpsWiphyParamsSet_Compat(struct wiphy *wiphy, int radio_idx,
+					     u32 changed)
+{
+	return CFG80211_OpsWiphyParamsSet(wiphy, changed);
+}
+
+/* 6.14 appended `const u8 *rx_addr` to remain_on_channel and moved the cookie
+ * to a by-value input.  The driver only fills the cookie in, so a local is
+ * enough; rx_addr (the receiver of a P2P action frame) has no counterpart in
+ * the vendor driver, which stays on-channel for the whole duration anyway. */
+static int CFG80211_OpsRemainOnChannel_Compat(
+	struct wiphy *wiphy, struct wireless_dev *wdev,
+	struct ieee80211_channel *chan, unsigned int duration, u64 cookie,
+	const u8 *rx_addr)
+{
+	u64 local_cookie = cookie;
+
+	return CFG80211_OpsRemainOnChannel(wiphy, wdev, chan, duration,
+					  &local_cookie);
+}
+#endif /* RTMP_CFG80211_COOKIE_BY_VALUE */
+
+#endif /* LINUX_VERSION_CODE >= 6.0.0 */
 
 /* =========================== Global Function ============================== */
 
@@ -3114,6 +3503,16 @@ BOOLEAN CFG80211_Register(
 		DBGPRINT(RT_DEBUG_ERROR, ("80211> Allocate MAC80211 CB fail!\n"));
 		return FALSE;
 	} 
+
+	/* os_alloc_mem() is a bare kmalloc(), so the control block arrives full of
+	 * heap garbage.  The embedded Cfg80211_bands[] must be zeroed: cfg80211
+	 * grows struct ieee80211_supported_band over time (6.18 appended
+	 * n_iftype_data / iftype_data) and wiphy_register() walks every field it
+	 * finds, so an uninitialised tail made it dereference a garbage pointer:
+	 *     wiphy_register+0x47c   ldrh w0, [x1]   x1 = 0xffffffff00000080
+	 *     CFG80211_Register <- rt2870_probe
+	 * i.e. the arm64 probe crashed in modprobe with SIGSEGV. */
+	NdisZeroMemory(pCfg80211_CB, sizeof(CFG80211_CB));
 	
 	/* allocate wireless device */
 	RTMP_DRIVER_80211_BANDINFO_GET(pAd, &BandInfo);

@@ -364,9 +364,9 @@ void *rausb_buffer_alloc(VOID *dev,
 	void *buf;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,35)
-	buf = usb_alloc_coherent(dev, size, GFP_ATOMIC, &DmaAddr);
+	buf = usb_alloc_coherent(dev, size, RTMP_USB_COHERENT_GFP, &DmaAddr);
 #else
-	buf = usb_buffer_alloc(dev, size, GFP_ATOMIC, &DmaAddr);
+	buf = usb_buffer_alloc(dev, size, RTMP_USB_COHERENT_GFP, &DmaAddr);
 #endif
 	*dma = (ra_dma_addr_t)DmaAddr;
 	return buf;

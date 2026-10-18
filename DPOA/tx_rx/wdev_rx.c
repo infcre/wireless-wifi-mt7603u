@@ -400,7 +400,9 @@ if (0) {
 		pOSPkt->dev = get_netdev_from_bssid(pAd, wdev_idx);
 		pOSPkt->data = pRxBlk->pTransData;
 		pOSPkt->len = pRxBlk->TransDataSize;
-		pOSPkt->tail = pOSPkt->data + pOSPkt->len;
+		/* skb->tail is an offset since 2.6.31, and ->data was just repointed
+		 * at an external buffer, so derive the offset from ->data. */
+		RtmpOsPktSetTailFromData(pOSPkt, pOSPkt->len);
 		//printk("%s: rx trans ...%d\n", __FUNCTION__, __LINE__);
 	}
 	else
@@ -1229,7 +1231,9 @@ VOID dev_rx_ctrl_frm(RTMP_ADAPTER *pAd, RX_BLK *pRxBlk)
 				BA_CONTROL *ba_ctrl;
 				DBGPRINT(RT_DEBUG_OFF, ("%s():BlockAck From WCID:%d\n", __FUNCTION__, pRxBlk->wcid));
 
-				ptr = pRxBlk->pHeader;
+				/* pHeader is HEADER_802_11 *; this block walks it as raw
+				 * bytes. Make the byte view explicit. */
+				ptr = (UCHAR *)pRxBlk->pHeader;
 				ptr += 4;
 				ra = ptr;
 				ptr += 6;

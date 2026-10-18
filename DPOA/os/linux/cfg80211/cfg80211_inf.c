@@ -989,7 +989,8 @@ VOID RTMP_CFG80211_VirtualIF_Remove(
 	
 
 			OPSTATUS_CLEAR_FLAG(pAd, fOP_AP_STATUS_MEDIA_STATE_CONNECTED);
-			cfg80211_disconnected(dev_p, 0, NULL, 0, GFP_KERNEL);
+			/* Interface teardown initiated by us. */
+			RTMP_CFG80211_DISCONNECTED(dev_p, 0, NULL, 0, TRUE);
 			
 			NdisZeroMemory(pAd->ApCfg.ApCliTab[MAIN_MBSSID].CfgApCliBssid, MAC_ADDR_LEN);
 			RtmpOSNetDevDetach(dev_p);
@@ -1221,7 +1222,8 @@ static INT CFG80211_DummyP2pIf_Close(
 			Wdev = &pAd->ApCfg.ApCliTab[MAIN_MBSSID].wdev;
 
 			OPSTATUS_CLEAR_FLAG(pAd, fOP_AP_STATUS_MEDIA_STATE_CONNECTED);
-			cfg80211_disconnected(dev_p, 0, NULL, 0, GFP_KERNEL);
+			/* Interface teardown initiated by us. */
+			RTMP_CFG80211_DISCONNECTED(dev_p, 0, NULL, 0, TRUE);
 			CFG80211OS_ScanEnd(pAd->pCfg80211_CB, TRUE);		
 			NdisZeroMemory(pAd->ApCfg.ApCliTab[MAIN_MBSSID].CfgApCliBssid, MAC_ADDR_LEN);
 //			RtmpOSNetDevDetach(dev_p);

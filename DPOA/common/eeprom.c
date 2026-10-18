@@ -621,6 +621,23 @@ out:
 
 
 
+/*
+ * Adapters for the USB EEPROM hooks.
+ *
+ * pChipOps->eeread / ->eewrite are 16-bit word accesses (declared as USHORT*
+ * in include/rtmp_chip.h), and these USB helpers already match that.
+ * The wrappers only reconcile the return type: eewrite is declared `int` but
+ * RTUSBWriteEEPROM16 returns NTSTATUS.
+ */
+#ifdef RTMP_USB_SUPPORT
+static int rtmp_ee_usb_write16(struct _RTMP_ADAPTER *pAd, USHORT offset,
+			       USHORT value)
+{
+	return RTUSBWriteEEPROM16(pAd, offset, value);
+}
+#endif /* RTMP_USB_SUPPORT */
+
+
 INT RtmpChipOpsEepromHook(RTMP_ADAPTER *pAd, INT infType)
 {
 	RTMP_CHIP_OP *pChipOps = &pAd->chipOps;
@@ -726,7 +743,7 @@ INT RtmpChipOpsEepromHook(RTMP_ADAPTER *pAd, INT infType)
 		case RTMP_DEV_INF_USB:
 			pChipOps->eeinit = NULL;
 			pChipOps->eeread = RTUSBReadEEPROM16;
-			pChipOps->eewrite = RTUSBWriteEEPROM16;
+			pChipOps->eewrite = rtmp_ee_usb_write16;
 			break;
 #endif /* RTMP_USB_SUPPORT */
 

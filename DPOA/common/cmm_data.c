@@ -3913,5 +3913,10 @@ INT rtmp_tx_burst_set(RTMP_ADAPTER *pAd)
 			
 #endif /* MT_MAC */
 #endif /* DOT11_N_SUPPORT */
+
+	/* The function is declared INT but every path above is a set-and-forget
+	 * register update; all callers ignore the result. Modern kernels reject
+	 * a non-void function that falls off the end (-Werror=return-type). */
+	return NDIS_STATUS_SUCCESS;
 }
 

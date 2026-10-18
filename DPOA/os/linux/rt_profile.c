@@ -211,7 +211,13 @@ NDIS_STATUS	RTMPReadParametersHook(RTMP_ADAPTER *pAd)
 		{
 #ifndef OS_ABL_SUPPORT
 			// TODO: need to roll back when convert into OSABL code
+			/* struct file lost its ->f_dentry member in Linux 3.18;
+			 * the dentry now lives at f_path.dentry. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
+				 fsize = (ULONG)srcf->f_path.dentry->d_inode->i_size;
+#else
 				 fsize = (ULONG)srcf->f_dentry->d_inode->i_size;
+#endif
 				if (buf_size < (fsize + 1))
 					buf_size = fsize + 1;
 #endif /* OS_ABL_SUPPORT */

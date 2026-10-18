@@ -390,7 +390,11 @@ error:
 }
 
 
-static VOID CmdReStartDLRsp(struct cmd_msg *msg, UINT32 *Data, UINT16 Len)
+/* Signature must match MSG_RSP_HANDLER (include/mcu/andes_core.h):
+ *   VOID (*)(struct cmd_msg *msg, char *payload, UINT16 payload_len)
+ * It was declared with UINT32 *, which no longer matches the type it is
+ * registered as. */
+static VOID CmdReStartDLRsp(struct cmd_msg *msg, char *Data, UINT16 Len)
 {
 	FW_RXD_2 Status;
 	Status = *(FW_RXD_2 *)Data;
@@ -447,7 +451,7 @@ static VOID CmdPsRetrieveRsp(struct cmd_msg *msg, char *Data, UINT16 Len)
 	P_EXT_EVENT_AP_PS_RETRIEVE_T EvtPsCapatibility;
 	UINT32 Status;
 
-    EvtPsCapatibility = (struct EXT_EVENT_AP_PS_RETRIEVE_T *)Data;
+    EvtPsCapatibility = (P_EXT_EVENT_AP_PS_RETRIEVE_T)Data;
         Status = le2cpu32(EvtPsCapatibility->u4Param1);
 
    DBGPRINT(RT_DEBUG_ERROR, ("%s Disable FW PS Supportstatus:%x !!!!!\n",__FUNCTION__,Status));
@@ -1381,7 +1385,7 @@ static VOID CmdMultipleRfRegAccessReadCb(struct cmd_msg *msg,
 	UINT32 Num = (len -20) / sizeof(EXT_EVENT_MULTI_CR_ACCESS_RD_T);
 	EXT_EVENT_MULTI_CR_ACCESS_RD_T *EventMultiCRAccessRD
 								= (EXT_EVENT_MULTI_CR_ACCESS_RD_T *)(data + 20);
-	MT_RF_REG_PAIR *RegPair = msg->rsp_payload;
+	MT_RF_REG_PAIR *RegPair = (MT_RF_REG_PAIR *)msg->rsp_payload;
 
 	for (Index = 0; Index < Num; Index++)
 	{
@@ -1441,7 +1445,7 @@ static VOID CmdMultipleMacRegAccessReadCb(struct cmd_msg *msg,
 	UINT32 Num = (len - 20) / sizeof(EXT_EVENT_MULTI_CR_ACCESS_RD_T);
 	EXT_EVENT_MULTI_CR_ACCESS_RD_T *EventMultiCRAccessRD
 								= (EXT_EVENT_MULTI_CR_ACCESS_RD_T *)(data + 20);
-	RTMP_REG_PAIR *RegPair = msg->rsp_payload;
+	RTMP_REG_PAIR *RegPair = (RTMP_REG_PAIR *)msg->rsp_payload;
 
 	for (Index = 0; Index < Num; Index++)
 	{
@@ -1682,10 +1686,17 @@ VOID CmdIORead32(struct _RTMP_ADAPTER *pAd, UINT32 Offset, UINT32 *Value)
 }
 
 
-static VOID EventExtCmdResult(struct cmd_msg *msg, char *Data, UINT16 Len)
+/* The actual work, keyed on the adapter.
+ *
+ * A previous revision declared this with a `struct cmd_msg *` first argument
+ * and recovered the adapter via msg->priv -- but the only direct caller
+ * (EventExtEventHandler) passes an RTMP_ADAPTER *, and `priv` does not sit at
+ * offset 0 of struct cmd_msg, so that path dereferenced the wrong memory.
+ * Split the logic out and keep a correctly-typed MSG_RSP_HANDLER wrapper for
+ * the callbacks registered via AndesInitCmdMsg(). */
+static VOID EventExtCmdResultHandle(RTMP_ADAPTER *pAd, char *Data)
 {
 	struct _EVENT_EXT_CMD_RESULT_T *EventExtCmdResult = (struct _EVENT_EXT_CMD_RESULT_T *)Data;
-	RTMP_ADAPTER *pAd = (RTMP_ADAPTER *)msg->priv;
 
 	DBGPRINT(RT_DEBUG_INFO, ("%s: EventExtCmdResult.ucExTenCID = 0x%x\n",
 									__FUNCTION__, EventExtCmdResult->ucExTenCID));
@@ -1696,6 +1707,11 @@ static VOID EventExtCmdResult(struct cmd_msg *msg, char *Data, UINT16 Len)
 									__FUNCTION__, EventExtCmdResult->u4Status));
 
 	RTMP_OS_TXRXHOOK_CALL(WLAN_CALIB_TEST_RSP,NULL,EventExtCmdResult->u4Status,pAd);
+}
+
+static VOID EventExtCmdResult(struct cmd_msg *msg, char *Data, UINT16 Len)
+{
+	EventExtCmdResultHandle((RTMP_ADAPTER *)msg->priv, Data);
 }
 
 
@@ -2015,7 +2031,7 @@ error:
 
 static VOID EventExtNicCapability(struct cmd_msg *msg, char *Data, UINT16 Len)
 {
-	struct _EXT_EVENT_NIC_CAPABILITY_T *ExtEventNicCapability = (struct EXT_EVENT_NIC_CAPABILITY *)Data;
+	struct _EXT_EVENT_NIC_CAPABILITY_T *ExtEventNicCapability = (struct _EXT_EVENT_NIC_CAPABILITY_T *)Data;
 	UINT32 Loop;
 
 	DBGPRINT(RT_DEBUG_OFF, ("The data code of firmware:"));
@@ -2801,7 +2817,7 @@ static VOID EventExtEventHandler(RTMP_ADAPTER *pAd, UINT8 ExtEID, UINT8 *Data, U
 	switch (ExtEID)
 	{
 		case EXT_EVENT_CMD_RESULT:
-			EventExtCmdResult(pAd, Data, Length);			
+			EventExtCmdResultHandle(pAd, (char *)Data);			
 			break;
 		case EXT_EVENT_FW_LOG_2_HOST:
 			ExtEventFwLog2HostHandler(pAd, Data, Length);
@@ -2896,7 +2912,7 @@ static VOID AndesMTRxProcessEvent(RTMP_ADAPTER *pAd, struct cmd_msg *rx_msg)
 						|| (event_rxd->fw_rxd_1.field.eid == MT_RESTART_DL_RSP)
 						|| (event_rxd->fw_rxd_1.field.eid == MT_TARGET_ADDRESS_LEN_RSP)
 						|| (event_rxd->fw_rxd_1.field.eid == MT_PATCH_SEM_RSP)) {
-					msg->rsp_handler(msg, (UINT32*)(GET_OS_PKT_DATAPTR(net_pkt) + sizeof(*event_rxd) - 4),
+					msg->rsp_handler(msg, (char *)(GET_OS_PKT_DATAPTR(net_pkt) + sizeof(*event_rxd) - 4),
 											event_rxd->fw_rxd_0.field.length - sizeof(*event_rxd) + 4);
 
 				}
@@ -3325,7 +3341,8 @@ VOID CmdEfusBufferModeSet(RTMP_ADAPTER *pAd)
 
 error:
 	DBGPRINT(RT_DEBUG_INFO, ("%s:(ret = %d)\n", __FUNCTION__, ret));
-	return ret;
+	/* CmdEfusBufferModeSet() returns VOID. */
+	return;
 
 }
 
@@ -3336,7 +3353,8 @@ VOID CmdSetTxPowerCtrl(RTMP_ADAPTER *pAd, UINT8 central_chl)
 	int ret = 0;
 	int i, j;
 	UINT8 PwrPercentageDelta = 0;
-	UINT32 Value;
+	/* RT28xx_EEPROM_READ16() reads a 16-bit word into a USHORT. */
+	USHORT Value;
 	struct MT_TX_PWR_CAP *cap = &pAd->chipCap.MTTxPwrCap;
 
 	msg = AndesAllocCmdMsg(pAd, sizeof(EXT_CMD_TX_POWER_CTRL_T));
@@ -3544,7 +3562,8 @@ VOID CmdGetThemalSensorResult(struct _RTMP_ADAPTER *pAd, UINT8 option)
 	
 error:
 	DBGPRINT(RT_DEBUG_INFO, ("%s:(ret = %d)\n", __FUNCTION__, ret));
-	return ret; 
+	/* CmdGetThemalSensorResult() returns VOID. */
+	return; 
 }
 
 #ifdef LED_CONTROL_SUPPORT

@@ -290,6 +290,13 @@ CC := $(CROSS_COMPILE)gcc
 LD := $(CROSS_COMPILE)ld
 
 WFLAGS := -Wall -Wstrict-prototypes -Wno-trigraphs
+
+# Modern kernels build modules with -Werror=date-time, which rejects the
+# __DATE__/__TIME__ macros still used in this vendor driver (e.g.
+# ap_cfg.c:Show_DriverInfo_Proc). Demote that one check from error to warning
+# instead of stripping the version banner.
+WFLAGS += -Wno-error=date-time
+
 WFLAGS += -DAGGREGATION_SUPPORT -DPIGGYBACK_SUPPORT -DWMM_SUPPORT  -DLINUX -DENHANCED_STAT_DISPLAY
 WFLAGS += -DSYSTEM_LOG_SUPPORT -DRT28xx_MODE=$(RT28xx_MODE) -DCHIPSET=$(MODULE) -DRESOURCE_PRE_ALLOC 
 #WFLAGS += -DDBG_DIAGNOSE -DDBG_RX_MCS -DDBG_TX_MCS
@@ -2064,4 +2071,39 @@ endif
 
 ifeq ($(PLATFORM),MT7628)
         EXTRA_CFLAGS := $(WFLAGS)
+endif
+
+#############################################################################
+# Linux 6.15 removed the EXTRA_CFLAGS mechanism outright -- it is gone from
+# scripts/Makefile.lib and scripts/Makefile.build (verified against
+# Linux 6.18.54 on arm64).  Up to then the vendor tree passed *every* -I and -D
+# through EXTRA_CFLAGS, so once it disappeared they were silently dropped and
+# the build died with:
+#     fatal error: rt_config.h: No such file or directory
+# (no compiler error about EXTRA_CFLAGS itself -- kbuild just ignores it).
+#
+# ccflags-y is the modern equivalent and has been supported since 2.6.28, so
+# setting both keeps pre-6.15 kernels working.  Duplicate -I / -D entries are
+# harmless; this is deliberately unconditional because WFLAGS is complete only
+# here, at the end of the file, after all the platform/mode conditionals.
+#############################################################################
+ccflags-y += $(WFLAGS) -I$(RT28xx_DIR)/include
+
+#############################################################################
+# External-package hook (added for the OpenWrt port).
+#
+# Some targets compile this driver against headers other than their own
+# kernel's: OpenWrt builds cfg80211/mac80211 from the backports tree, so the
+# driver must be compiled against $(STAGING_DIR)/usr/include/mac80211 (the
+# cfg80211 API its cfg80211.ko actually implements) rather than the in-kernel
+# 6.6 header.  Those -I paths and -D defines only exist in the package
+# Makefile, so accept them here as RTMP_EXTRA_CFLAGS.
+#
+# Empty by default: native builds (Debian, Armbian) are unaffected, because a
+# command-line assignment is the only way this becomes non-empty and
+# command-line variables are visible at every level of the make.
+#############################################################################
+ifneq ($(RTMP_EXTRA_CFLAGS),)
+ccflags-y += $(RTMP_EXTRA_CFLAGS)
+WFLAGS += $(RTMP_EXTRA_CFLAGS)
 endif

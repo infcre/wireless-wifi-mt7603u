@@ -2369,7 +2369,7 @@ VOID MlmeRALog(
 	struct timeval tval;
 
 	do_gettimeofday(&tval);
-	newTime = (tval.tv_sec*1000000L + tval.tv_usec);
+	newTime = (tval.tv_sec*1000000L + RTMP_TV_USEC(tval));
 #endif
 
 	if (TxTotalCnt !=0 || raLogType==RAL_QUICK_DRS
@@ -2538,8 +2538,11 @@ UCHAR ra_get_lowest_rate(RTMP_ADAPTER *pAd, MAC_TABLE_ENTRY *pEntry)
 	
 		do {
 			TxRateIndex = NextTxRateIndex;
-			/*  Get pointer to CurrTxRate entry */
-			pNextTxRate = (RTMP_RA_LEGACY_TB *)PTX_RA_GRP_ENTRY(pTable, TxRateIndex);
+			/*  Get pointer to CurrTxRate entry.
+			 * PTX_RA_GRP_ENTRY already yields RTMP_RA_GRP_TB *; the
+			 * stray cast to RTMP_RA_LEGACY_TB * contradicted
+			 * pNextTxRate's type and is rejected by GCC 14. */
+			pNextTxRate = PTX_RA_GRP_ENTRY(pTable, TxRateIndex);
 			NextTxRateIndex = pNextTxRate->downMcs;
 		} while ( TxRateIndex != NextTxRateIndex );
 	} else {

@@ -1614,19 +1614,21 @@ VOID CFG80211_LostApInform(
 	PRTMP_ADAPTER pAd = (PRTMP_ADAPTER)pAdCB;
 	CFG80211_CB *p80211CB = pAd->pCfg80211_CB;
 	
-	DBGPRINT(RT_DEBUG_TRACE, ("80211> CFG80211_LostApInform ==> %d\n", 
-					p80211CB->pCfg80211_Wdev->sme_state));
+	DBGPRINT(RT_DEBUG_TRACE, ("80211> CFG80211_LostApInform connecting=%d connected=%d\n", 
+					RTMP_WDEV_IS_CONNECTING(p80211CB->pCfg80211_Wdev),
+					RTMP_WDEV_IS_CONNECTED(p80211CB->pCfg80211_Wdev)));
 	pAd->StaCfg.bAutoReconnect = FALSE;
 
 
-	if (p80211CB->pCfg80211_Wdev->sme_state == CFG80211_SME_CONNECTING)
+	if (RTMP_WDEV_IS_CONNECTING(p80211CB->pCfg80211_Wdev))
 	{
 		   cfg80211_connect_result(pAd->net_dev, NULL, NULL, 0, NULL, 0,
 								   WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_KERNEL);
 	}
-	else if (p80211CB->pCfg80211_Wdev->sme_state == CFG80211_SME_CONNECTED)
+	else if (RTMP_WDEV_IS_CONNECTED(p80211CB->pCfg80211_Wdev))
 	{
-		   cfg80211_disconnected(pAd->net_dev, 0, NULL, 0, GFP_KERNEL);
+		   /* The AP vanished on us: this is NOT a locally generated disconnect. */
+		   RTMP_CFG80211_DISCONNECTED(pAd->net_dev, 0, NULL, 0, FALSE);
 	} 
 }
 #endif /*CONFIG_STA_SUPPORT*/
@@ -2070,7 +2072,7 @@ BOOLEAN CFG80211_checkScanTable(
 
 	/* Fake TSF */
 	do_gettimeofday(&tv);
-	timestamp = ((UINT64)tv.tv_sec * 1000000) + tv.tv_usec;
+	timestamp = ((UINT64)tv.tv_sec * 1000000) + RTMP_TV_USEC(tv);
 
 	bss = cfg80211_get_bss(pWiphy, NULL, pApCliEntry->MlmeAux.Bssid,
 			       pApCliEntry->MlmeAux.Ssid, pApCliEntry->MlmeAux.SsidLen, 
@@ -2211,7 +2213,8 @@ VOID CFG80211_JoinIBSS(
 	NStatus = MlmeAllocateMemory(NULL, &pBeaconFrame);
 	if (NStatus != NDIS_STATUS_SUCCESS) {
 		CFG80211DBG(RT_DEBUG_TRACE, ("80211> %s pBeaconFrame alloc failed.\n", __FUNCTION__));
-		return 0;
+		/* CFG80211_JoinIBSS() returns VOID; a bare `return` is correct. */
+		return;
 	}
 
 	if (WMODE_EQUAL(pAd->CommonCfg.PhyMode, WMODE_B)

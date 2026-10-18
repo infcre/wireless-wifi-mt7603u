@@ -32,6 +32,7 @@
 
 #include "rt_config.h"
 #include "chlist.h"
+#include <linux/workqueue.h>	/* for the AP-only "empty scan" deferral */
 
 #if defined (HE_BD_CFG80211_SUPPORT) && defined (BD_KERNEL_VER)
 #undef  LINUX_VERSION_CODE
@@ -199,6 +200,15 @@ VOID CFG80211OS_UnRegister(VOID *pCB, VOID *pNetDevOrg)
 #ifdef RFKILL_HW_SUPPORT
 		wiphy_rfkill_stop_polling(pCfg80211_CB->pCfg80211_Wdev->wiphy);
 #endif /* RFKILL_HW_SUPPORT */
+
+		/*
+			Retire the AP-only "empty scan" work item BEFORE the wiphy goes
+			away: cfg80211 frees any outstanding scan request during
+			wiphy_unregister(), so a completion still in flight would
+			otherwise dereference freed memory.
+		*/
+		CFG80211OS_APNoScanFlush();
+
 		wiphy_unregister(pCfg80211_CB->pCfg80211_Wdev->wiphy);
 		wiphy_free(pCfg80211_CB->pCfg80211_Wdev->wiphy);
 		kfree(pCfg80211_CB->pCfg80211_Wdev);
@@ -386,6 +396,11 @@ BOOLEAN CFG80211_SupBandInit(
 
 	/* 7. Fill the Band 2.4GHz */
 	pBand = &pCfg80211_CB->Cfg80211_bands[IEEE80211_BAND_2GHZ];
+	/* Zero first: only the fields this port knows about get filled below, and
+	 * cfg80211 appends fields to struct ieee80211_supported_band over time
+	 * (n_iftype_data / iftype_data in 6.18).  wiphy_register() walks them, so
+	 * a partially initialised struct means it dereferences heap garbage. */
+	NdisZeroMemory(pBand, sizeof(*pBand));
 	if (pDriverBandInfo->RFICType & RFIC_24GHZ)
 	{
 		pBand->n_channels = CFG80211_NUM_OF_CHAN_2GHZ;
@@ -443,6 +458,7 @@ BOOLEAN CFG80211_SupBandInit(
 
 	/* 8. Fill the Band 5GHz */
 	pBand = &pCfg80211_CB->Cfg80211_bands[IEEE80211_BAND_5GHZ];
+	NdisZeroMemory(pBand, sizeof(*pBand));
 	if (pDriverBandInfo->RFICType & RFIC_5GHZ)
 	{
 		pBand->n_channels = CFG80211_NUM_OF_CHAN_5GHZ;
@@ -885,7 +901,7 @@ VOID CFG80211OS_Scaning(
 	{
 		struct timeval tv;
 		do_gettimeofday(&tv);
-		mgmt->u.probe_resp.timestamp = ((UINT64) tv.tv_sec * 1000000) + tv.tv_usec;
+		mgmt->u.probe_resp.timestamp = ((UINT64) tv.tv_sec * 1000000) + RTMP_TV_USEC(tv);
 	}
 
 	/* inform 80211 a scan is got */
@@ -939,7 +955,24 @@ VOID CFG80211OS_ScanEnd(
 	if (pCfg80211_CB->pCfg80211_ScanReq)
 	{
 		CFG80211DBG(RT_DEBUG_ERROR, ("80211> cfg80211_scan_done\n"));
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0))
+		/*
+			cfg80211_scan_done() took a plain `bool aborted` before Linux
+			4.12 and a `struct cfg80211_scan_info *` from then on. The
+			vendor code (and its 2019 .bak) still passed the BOOLEAN, which
+			went unnoticed because this whole block sits behind
+			#ifdef CONFIG_STA_SUPPORT -- an AP-only build never compiled it.
+		*/
+		{
+			struct cfg80211_scan_info Info;
+
+			NdisZeroMemory(&Info, sizeof(Info));
+			Info.aborted = FlgIsAborted ? TRUE : FALSE;
+			cfg80211_scan_done(pCfg80211_CB->pCfg80211_ScanReq, &Info);
+		}
+#else
 		cfg80211_scan_done(pCfg80211_CB->pCfg80211_ScanReq, FlgIsAborted);
+#endif /* LINUX_VERSION_CODE: 4.12.0 */
 		pCfg80211_CB->pCfg80211_ScanReq = NULL;
 	}
 	else
@@ -949,6 +982,96 @@ VOID CFG80211OS_ScanEnd(
 	NdisReleaseSpinLock(&pCfg80211_CB->scan_notify_lock);
 #endif /* CONFIG_STA_SUPPORT */
 #endif /* LINUX_VERSION_CODE */
+}
+
+
+#if defined(CONFIG_AP_SUPPORT) && !defined(CONFIG_STA_SUPPORT)
+/*
+ * ---------------------------------------------------------------------------
+ * "Empty scan" support for AP-only builds.
+ *
+ * An AP-only build has no scan engine: CFG80211_OpsScan() and
+ * CFG80211OS_ScanEnd() are both compiled out under !CONFIG_STA_SUPPORT, so the
+ * .scan callback used to return -EOPNOTSUPP.
+ *
+ * hostapd will not bring up an HT40 AP on 2.4 GHz until a scan of neighbouring
+ * BSSes has succeeded -- 802.11n requires it to honour the 40 MHz intolerance
+ * bit advertised by other BSSes. With -EOPNOTSUPP that pre-check aborts the
+ * whole AP:
+ *
+ *   interface state COUNTRY_UPDATE->HT_SCAN
+ *   Failed to request a scan of neighboring BSSes ret=-95 (Operation not supported)
+ *   interface state HT_SCAN->DISABLED
+ *   AP-DISABLED / Unable to setup interface.
+ *
+ * So accept the request and report an empty result a moment later.
+ *
+ * Two properties are deliberate:
+ *
+ *  1. Completion is DEFERRED to a work item. Calling cfg80211_scan_done()
+ *     straight from inside the .scan callback would run before cfg80211 has
+ *     finished registering the request, which can use-after-free it.
+ *
+ *  2. CFG80211OS_APNoScanFlush() must run BEFORE wiphy_unregister():
+ *     cfg80211 frees an outstanding scan request when the wiphy goes away, so
+ *     a work item still in flight would touch freed memory.
+ *
+ * CAVEAT: this skips the OBSS / 40 MHz-intolerance check. We do not actually
+ * look for interfering or intolerant BSSes before enabling HT40; only use
+ * 40 MHz on 2.4 GHz in a reasonably clean environment.
+ * ---------------------------------------------------------------------------
+ */
+static struct cfg80211_scan_request *pApNoScanReq;
+static DEFINE_SPINLOCK(ApNoScanLock);
+
+static void CFG80211OS_APNoScanWork(struct work_struct *pWork)
+{
+	struct cfg80211_scan_request *pReq;
+	struct cfg80211_scan_info Info;
+
+	pWork = pWork; /* unused */
+
+	spin_lock_bh(&ApNoScanLock);
+	pReq = pApNoScanReq;
+	pApNoScanReq = NULL;
+	spin_unlock_bh(&ApNoScanLock);
+
+	if (pReq == NULL)
+		return;
+
+	NdisZeroMemory(&Info, sizeof(Info));
+	Info.aborted = FALSE;
+	cfg80211_scan_done(pReq, &Info);
+}
+
+static DECLARE_WORK(ApNoScanWork, CFG80211OS_APNoScanWork);
+#endif /* CONFIG_AP_SUPPORT && !CONFIG_STA_SUPPORT */
+
+
+INT CFG80211OS_APNoScanStart(struct cfg80211_scan_request *pRequest)
+{
+#if defined(CONFIG_AP_SUPPORT) && !defined(CONFIG_STA_SUPPORT)
+	spin_lock_bh(&ApNoScanLock);
+	pApNoScanReq = pRequest;
+	spin_unlock_bh(&ApNoScanLock);
+
+	schedule_work(&ApNoScanWork);
+	return 0;
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+
+
+VOID CFG80211OS_APNoScanFlush(VOID)
+{
+#if defined(CONFIG_AP_SUPPORT) && !defined(CONFIG_STA_SUPPORT)
+	cancel_work_sync(&ApNoScanWork);
+
+	spin_lock_bh(&ApNoScanLock);
+	pApNoScanReq = NULL;
+	spin_unlock_bh(&ApNoScanLock);
+#endif
 }
 
 
@@ -1116,14 +1239,16 @@ VOID CFG80211OS_NewSta(IN PNET_DEV pNetDev, IN const PUCHAR mac_addr, IN const P
 /* If get error here, be sure patch the cfg80211_new_sta.patch into kernel. */
 	if (pNetDev->ieee80211_ptr->iftype != RT_CMD_80211_IFTYPE_ADHOC) 
 	{
-		sinfo.filled = STATION_INFO_ASSOC_REQ_IES;
-        	mgmt = (struct ieee80211_mgmt *) assoc_frame;   
+	/* station_info->filled was removed in Linux 4.0; cfg80211 owns the
+	 * bitmap now. The assoc IEs below are still handed over. */
+		mgmt = (struct ieee80211_mgmt *) assoc_frame;   
         	sinfo.assoc_req_ies_len = assoc_len - 24 - 4;
         	sinfo.assoc_req_ies = mgmt->u.assoc_req.variable;
 	}
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,34))	
-	return cfg80211_new_sta(pNetDev, mac_addr, &sinfo, GFP_ATOMIC);
+	return cfg80211_new_sta(RTMP_CFG80211_STA_WDEV(pNetDev), mac_addr,
+				&sinfo, GFP_ATOMIC);
 #endif /* LINUX_VERSION_CODE: 2.6.34 */
 
 }
@@ -1131,7 +1256,8 @@ VOID CFG80211OS_NewSta(IN PNET_DEV pNetDev, IN const PUCHAR mac_addr, IN const P
 VOID CFG80211OS_DelSta(IN PNET_DEV pNetDev, IN const PUCHAR mac_addr)
 {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0))
-	return cfg80211_del_sta(pNetDev, mac_addr, GFP_ATOMIC);
+	return cfg80211_del_sta(RTMP_CFG80211_STA_WDEV(pNetDev), mac_addr,
+				GFP_ATOMIC);
 #endif /* LINUX_VERSION_CODE: 3.0.0 */
 }
 
@@ -1147,8 +1273,26 @@ VOID CFG80211OS_Roamed(
 	IN UCHAR *pReqIe, IN UINT32 ReqIeLen,
 	IN UCHAR *pRspIe, IN UINT32 RspIeLen)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+	/* cfg80211_roamed() takes a struct cfg80211_roam_info since 4.12; from
+	 * 6.5 the BSSID lives in the per-link array instead of the top level. */
+	struct cfg80211_roam_info roam;
+
+	NdisZeroMemory(&roam, sizeof(roam));
+	roam.req_ie = pReqIe;
+	roam.req_ie_len = ReqIeLen;
+	roam.resp_ie = pRspIe;
+	roam.resp_ie_len = RspIeLen;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+	roam.links[0].bssid = pBSSID;
+	roam.valid_links = BIT(0);
+#else
+	roam.bssid = pBSSID;
+#endif
+
+	cfg80211_roamed(pNetDev, &roam, GFP_KERNEL);
+#else
 	cfg80211_roamed(pNetDev,
-//#if (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 39))
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 32))
 		NULL, /* CFG TODO: ieee80211_channel */
 #endif /* LINUX_VERSION_CODE: 2.6.39 */
@@ -1156,6 +1300,7 @@ VOID CFG80211OS_Roamed(
 		pReqIe, ReqIeLen,
 		pRspIe, RspIeLen, 
 		GFP_KERNEL);
+#endif /* LINUX_VERSION_CODE >= 4.12.0 */
 }
 
 VOID CFG80211OS_RecvObssBeacon(VOID *pCB, const PUCHAR pFrame, INT frameLen, INT freq)
@@ -1194,8 +1339,11 @@ VOID CFG80211OS_InformBSS(
 
 	pWiphy = pCfg80211_CB->pCfg80211_Wdev->wiphy;
 	
+	/* cfg80211_inform_bss() gained an `ftype` argument right after the
+	 * channel (Linux 4.1); this path has no frame-type information. */
 	cfg80211_inform_bss(pWiphy, 
 					pCfg80211_CB->pCfg80211_Channels,
+					CFG80211_BSS_FTYPE_UNKNOWN,
 					pBssid,
 					0,
 					WLAN_CAPABILITY_IBSS,
@@ -1206,7 +1354,11 @@ VOID CFG80211OS_InformBSS(
 
 VOID CFG80211OS_JoinIBSS(IN PNET_DEV pNetDev, IN const PUCHAR pBssid)
 {
-	cfg80211_ibss_joined(pNetDev, pBssid, GFP_KERNEL);
+	/* cfg80211_ibss_joined() gained a `struct ieee80211_channel *`
+	 * argument before gfp_t (Linux 4.x); this caller has no channel
+	 * reference, so pass NULL -- cfg80211 tolerates it for the
+	 * "joined IBSS" notification. */
+	cfg80211_ibss_joined(pNetDev, pBssid, NULL, GFP_KERNEL);
 }
 
 #ifdef CFG80211_BUILD_CHANNEL_LIST

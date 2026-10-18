@@ -2501,7 +2501,22 @@ typedef struct _STA_TR_ENTRY{
 #endif /* VENDOR_FEATURE1_SUPPORT */
 
 #ifdef DOT11_N_SUPPORT
-	UINT32 CachedBuf[16];	/* UINT (4 bytes) for alignment */
+	/* UINT32 for alignment.
+	 *
+	 * MUST stay >= the largest 802.11 header the cache path copies.
+	 * ap_data.c computes cache_sz as (pHeaderBufPtr - &HeaderBuf[0]), which
+	 * reaches 68 bytes for MT7603 (TXWI + 802.11 hdr + QoS + padding +
+	 * AMSDU subheader + LLC/SNAP). The original 16-entry (64-byte) array
+	 * therefore overflowed by 4 bytes on every cached AMPDU transmit:
+	 *
+	 *   memmove: detected field-spanning write (size 68) of single field
+	 *            "(UCHAR *)(&tr_entry->CachedBuf[0])" at ap/ap_data.c:1197
+	 *            (size 64)
+	 *   WARNING: at ap_data.c:1197 AP_AMPDU_Frame_Tx
+	 *
+	 * Older kernels copied silently and clobbered the fields that follow
+	 * CachedBuf in STA_TR_ENTRY. 17 entries = 68 bytes covers it. */
+	UINT32 CachedBuf[17];	/* 68B: TXWI + hdr + pad + AMSDU + LLC/SNAP */
 
 	USHORT RXBAbitmap;	/* fill to on-chip  RXWI_BA_BITMASK in 8.1.3RX attribute entry format */
 	USHORT TXBAbitmap;	/* This bitmap as originator, only keep in software used to mark AMPDU bit in TXWI */

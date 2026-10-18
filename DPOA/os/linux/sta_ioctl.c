@@ -769,6 +769,26 @@ int rt_ioctl_giwscan(struct net_device *dev,
 			struct iw_request_info *info,
 			struct iw_point *data, char *extra)
 {
+#if !RT_COMPAT_WEXT_PRIV
+	/*
+	 * OpenWrt port: the wext scan-results encoder is compiled out.
+	 *
+	 * Every branch below ends in iwe_stream_add_event/point/value(), which the
+	 * kernel exports from cfg80211's wext-core.o -- an object built only when
+	 * WEXT is enabled.  OpenWrt has no WEXT at all, so those three symbols do
+	 * not exist and the module would fail to load with
+	 *     insmod: unknown symbol iwe_stream_add_event
+	 * which compiling and even linking happily conceal.
+	 *
+	 * Nothing can reach this function on such a system anyway: the
+	 * iw_handler_def that would dispatch to it has no handler tables without
+	 * WEXT (see rt28xx_iw_handler_def), and rt_linux.c / rt_main_dev.c do not
+	 * install wireless_handlers either.  Userspace scans go through nl80211
+	 * (`iw dev <if> scan'), which the cfg80211 code path implements.
+	 */
+	(void)dev; (void)info; (void)data; (void)extra;
+	return -EOPNOTSUPP;
+#else /* RT_COMPAT_WEXT_PRIV */
 	VOID *pAd = NULL;
 	int i=0, status = 0;
 	RTMP_STRING *current_ev = extra, *previous_ev = extra;
@@ -1235,6 +1255,7 @@ go_out:
 		os_free_mem(NULL, pIoctlScan->pBssTable);
 
 	return status;
+#endif /* RT_COMPAT_WEXT_PRIV */
 }
 #endif
 
@@ -2383,10 +2404,20 @@ const struct iw_handler_def rt28xx_iw_handler_def =
 #define	N(a)	(sizeof (a) / sizeof (a[0]))
 	.standard	= (iw_handler *) rt_handler,
 	.num_standard	= sizeof(rt_handler) / sizeof(iw_handler),
+	/*
+	 * OpenWrt port: the private-ioctl members of struct iw_handler_def exist
+	 * only when the kernel was built with CONFIG_WEXT_PRIV; OpenWrt builds no
+	 * WEXT at all, so naming them is a compile error there.  Dropping them is
+	 * also the desired runtime behaviour -- it makes this driver's iwpriv
+	 * surface unreachable, and iwpriv is what wedged the Debian host during
+	 * bring-up (module exit path, RTNL + module_mutex held forever).
+	 */
+#if RT_COMPAT_WEXT_PRIV
 	.private	= (iw_handler *) rt_priv_handlers,
 	.num_private		= N(rt_priv_handlers),
 	.private_args	= (struct iw_priv_args *) privtab,
 	.num_private_args	= N(privtab),
+#endif
 #if IW_HANDLER_VERSION >= 7
     .get_wireless_stats = rt28xx_get_wireless_stats,
 #endif 
@@ -2606,7 +2637,7 @@ INT rt28xx_sta_ioctl(struct net_device *net_dev, struct ifreq *rq, INT cmd)
 		case SIOCGIWPRIV:
 			if (wrqin->u.data.pointer) 
 			{
-				if ( access_ok(VERIFY_WRITE, wrqin->u.data.pointer, sizeof(privtab)) != TRUE)
+				if ( RTMP_ACCESS_OK(VERIFY_WRITE, wrqin->u.data.pointer, sizeof(privtab)) != TRUE)
 					break;
 				if ((sizeof(privtab) / sizeof(privtab[0])) <= wrq->u.data.length)
 				{
@@ -2619,7 +2650,7 @@ INT rt28xx_sta_ioctl(struct net_device *net_dev, struct ifreq *rq, INT cmd)
 			}
 			break;
 		case RTPRIV_IOCTL_SET:
-			if(access_ok(VERIFY_READ, wrqin->u.data.pointer, wrqin->u.data.length) != TRUE)   
+			if(RTMP_ACCESS_OK(VERIFY_READ, wrqin->u.data.pointer, wrqin->u.data.length) != TRUE)   
 					break;
 			return rt_ioctl_setparam(net_dev, NULL, NULL, wrqin->u.data.pointer);
 			break;

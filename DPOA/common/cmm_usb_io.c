@@ -469,6 +469,11 @@ static NTSTATUS ResetBulkOutHdlr(IN PRTMP_ADAPTER pAd, IN PCmdQElmt CMDQelmt)
 	DBGPRINT_RAW(RT_DEBUG_TRACE, ("CmdThread : CMDTHREAD_RESET_BULK_OUT<===\n"));
 	return NDIS_STATUS_SUCCESS;
 
+#else
+	/* MT_MAC (Andes/MCU) parts do not use the RTMP/RLT bulk-out reset
+	 * protocol implemented above; the whole body is compiled out, so
+	 * return success explicitly (GCC 14 -Werror=return-type). */
+	return NDIS_STATUS_SUCCESS;
 #endif
 }
 
@@ -593,6 +598,9 @@ static NTSTATUS ResetBulkInHdlr(IN PRTMP_ADAPTER pAd, IN PCmdQElmt CMDQelmt)
 	}
 
 	DBGPRINT_RAW(RT_DEBUG_TRACE, ("CmdThread : CMDTHREAD_RESET_BULK_IN <===\n"));
+	return NDIS_STATUS_SUCCESS;
+#else
+	/* See ResetBulkOutHdlr: not applicable on MT_MAC builds. */
 	return NDIS_STATUS_SUCCESS;
 #endif
 }

@@ -154,7 +154,8 @@ static void mt7603_switch_channel(RTMP_ADAPTER *pAd, UCHAR channel, BOOLEAN scan
 		RTMP_SEM_EVENT_WAIT(&pAd->hw_atomic, ret);
 		if (ret != 0) {
 			DBGPRINT(RT_DEBUG_ERROR, ("reg_atomic get failed(ret=%d)\n", ret));
-			return STATUS_UNSUCCESSFUL;
+			/* mt7603_switch_channel() returns void. */
+			return;
 		}
 	}
 #endif /* RTMP_MAC_USB */
@@ -478,7 +479,8 @@ int mt7603_read_chl_pwr(RTMP_ADAPTER *pAd)
 {
 	UINT32 i, choffset;
 	struct MT_TX_PWR_CAP *cap = &pAd->chipCap.MTTxPwrCap;
-	UINT32 Value;
+	/* RT28xx_EEPROM_READ16() reads a 16-bit word into a USHORT. */
+	USHORT Value;
 	
 	mt7603_get_tx_pwr_info(pAd);
 

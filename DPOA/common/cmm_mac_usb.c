@@ -1983,6 +1983,12 @@ NDIS_STATUS	RTUSBWriteHWMACAddress(RTMP_ADAPTER *pAd)
 	AsicSetDevMac(pAd, pAd->CurrentAddress, 0);
 
 	return Status;
+#else
+	/* MT_MAC (Andes/MCU) parts: the MAC address is programmed through the
+	 * EFUSE/WTBL path, so there is nothing to push here. Without this the
+	 * function falls off the end of a non-void function
+	 * (-Werror=return-type) because the whole body above is compiled out. */
+	return NDIS_STATUS_SUCCESS;
 #endif
 }
 
@@ -2955,6 +2961,12 @@ BOOLEAN AsicCheckCommandOk(
 
 
 	return ret;
+#else
+	/* MT_MAC (Andes/MCU) parts: the mailbox/CID protocol above only applies
+	 * to the older RTMP/RLT MACs. On MT_MAC the command confirmation is
+	 * handled by the MCU command path; report success so callers keep going.
+	 * This also fixes the fall-off-the-end return error. */
+	return TRUE;
 #endif
 }
 

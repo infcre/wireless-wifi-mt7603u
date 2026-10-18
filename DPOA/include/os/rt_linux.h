@@ -17,6 +17,9 @@
 
 #include <linux/module.h>
 #include <linux/version.h>
+/* Modern-kernel compatibility shim. Must come before the rest of the kernel
+ * headers this file pulls in. */
+#include <rt_6x_compat.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
 #include <linux/init.h>
@@ -32,6 +35,9 @@
 #include <linux/ethtool.h>
 #include <linux/wireless.h>
 #include <linux/proc_fs.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+#include <linux/cred.h>		/* override_creds()/revert_creds(); see OS_FS_INFO */
+#endif
 #include <linux/delay.h>
 #include <linux/if_arp.h>
 #include <linux/ctype.h>
@@ -67,7 +73,13 @@
 #include <linux/unistd.h>
 #include <asm/uaccess.h>
 #include <asm/types.h>
+/* asm/unaligned.h was removed in Linux 6.2; the helpers moved to
+ * linux/unaligned.h. See rt_6x_compat.h. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+#include <linux/unaligned.h>	/* for get_unaligned() */
+#else
 #include <asm/unaligned.h>	/* for get_unaligned() */
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
 #include <linux/pid.h>
@@ -191,8 +203,17 @@ extern	const struct iw_handler_def rt28xx_ap_iw_handler_def;
 /***********************************************************************************
  *	Compiler related definitions
  ***********************************************************************************/
-#undef __inline
-#define __inline		static inline
+/* NOTE: this driver historically did `#undef __inline` / `#define __inline
+ * static inline`. On modern kernels that is actively harmful: the kernel
+ * defines `__inline` and uses it to build `asm_inline` (see
+ * arch/x86/include/asm/bug.h), so redefining it turns `asm_inline volatile(...)`
+ * into `static inline volatile(...)` and breaks every subsequent kernel header.
+ *
+ * Use a private macro instead, and leave `__inline` alone.
+ */
+#ifndef RT_INLINE
+#define RT_INLINE	static inline
+#endif
 #define IN
 #define OUT
 #define INOUT
@@ -328,7 +349,18 @@ typedef struct _OS_FS_INFO_
 {
 	int				fsuid;
 	int				fsgid;
+/* set_fs()/get_fs()/mm_segment_t were removed in Linux 5.10; kernel_read()
+ * and kernel_write() handle user/kernel addressing themselves, so the saved
+ * address-space selector has no meaning there. Guarded to keep the struct
+ * identical on older kernels. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 	mm_segment_t	fs;
+#else
+	/* Privilege elevation for filesystem access is done with
+	 * override_creds() on modern kernels; stash the previous cred here so
+	 * __RtmpOSFSInfoChange() can revert it. */
+	void			*cred;
+#endif
 } OS_FS_INFO;
 
 #define IS_FILE_OPEN_ERR(_fd) 	((_fd == NULL) || IS_ERR((_fd)))
@@ -538,8 +570,15 @@ do { \
 /*typedef	struct pid *	THREAD_PID; // no use */
 #define	THREAD_PID_INIT_VALUE	NULL
 /* TODO: Use this IOCTL carefully when linux kernel version larger than 2.6.27, because the PID only correct when the user space task do this ioctl itself. */
-/*#define RTMP_GET_OS_PID(_x, _y)    _x = get_task_pid(current, PIDTYPE_PID); */
+/* NOTE: struct task_struct no longer carries an inline `pids[]` array.
+ * RTMP_OS_PID is `struct pid *` here (KILL_THREAD_PID -> kill_pid() requires a
+ * struct pid *), so use the accessor that returns exactly that.
+ * The reference pin is harmless and keeps the pid valid for the later kill. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
+#define RT_GET_OS_PID(_x, _y)		do{_x=get_task_pid(current, PIDTYPE_PID);}while(0)
+#else
 #define RT_GET_OS_PID(_x, _y)		do{rcu_read_lock(); _x=(ULONG)current->pids[PIDTYPE_PID].pid; rcu_read_unlock();}while(0)
+#endif
 #ifdef OS_ABL_FUNC_SUPPORT
 #define RTMP_GET_OS_PID(_a, _b)			RtmpOsGetPid(&_a, _b)
 #else
@@ -810,8 +849,9 @@ void linux_pci_unmap_single(void *handle, ra_dma_addr_t dma_addr, size_t size, i
 #define PCI_MAP_SINGLE_DEV(_handle, _ptr, _size, _sd_idx, _dir)				\
 	linux_pci_map_single(_handle, _ptr, _size, _sd_idx, _dir)
 
-#define DMA_MAPPING_ERROR(_handle, _ptr)	\
-	dma_mapping_error(&((struct pci_dev *)(_handle))->dev, _ptr)
+/* NOTE: this file used to define a 2-argument DMA_MAPPING_ERROR() macro.
+ * Modern kernels define DMA_MAPPING_ERROR (1 arg) in linux/dma-mapping.h,
+ * which collides. The driver never referenced its own macro, so it is gone. */
 
 #define PCI_UNMAP_SINGLE(_pAd, _ptr, _size, _dir)						\
 	linux_pci_unmap_single(((POS_COOKIE)(_pAd->OS_Cookie))->pci_dev, _ptr, _size, _dir)
@@ -1011,16 +1051,54 @@ do {	\
 #define SET_OS_PKT_LEN(_pkt, _len)	\
 		(RTPKT_TO_OSPKT(_pkt)->len) = (_len)
 
+/* Since Linux 2.6.31 skb->tail/head/end are offsets, not pointers, and must be
+ * read through the accessors.
+ *
+ * NOTE on SET_OS_PKT_DATATAIL: the third argument is a DELTA applied to the
+ * current tail, not an absolute length. The legacy expansion
+ * `tail = _start + _len` shows this: callers pass either
+ *   (_pData,  __DataSize)  -- new data pointer plus full size, or
+ *   (GetTail(), -n)        -- shorten the tail by n (OS_PKT_TAIL_ADJUST).
+ * Do not map _len onto skb_set_tail_pointer()'s offset-from-head. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 31)
+#define GET_OS_PKT_DATATAIL(_pkt) \
+		(PUCHAR)skb_tail_pointer(RTPKT_TO_OSPKT(_pkt))
+#define SET_OS_PKT_DATATAIL(_pkt, _start, _len)	\
+		((RTPKT_TO_OSPKT(_pkt))->tail += (unsigned int)(_len))
+#else
 #define GET_OS_PKT_DATATAIL(_pkt) \
 		(RTPKT_TO_OSPKT(_pkt)->tail)
 #define SET_OS_PKT_DATATAIL(_pkt, _start, _len)	\
 		((RTPKT_TO_OSPKT(_pkt))->tail) = (PUCHAR)((_start) + (_len))
+#endif
 
 #define GET_OS_PKT_HEAD(_pkt) \
 		(RTPKT_TO_OSPKT(_pkt)->head)
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 31)
+#define GET_OS_PKT_END(_pkt) \
+		skb_end_pointer(RTPKT_TO_OSPKT(_pkt))
+
+/* Set skb->tail so that skb_tail_pointer() == (data + len).
+ *
+ * skb_set_tail_pointer() interprets its argument as an offset from skb->head,
+ * which is wrong when a caller has repointed skb->data at an external buffer
+ * (RTMP_OS_PKT_INIT and the RX transaction path do exactly that). Compute the
+ * offset from the current head instead. */
+static inline void RtmpOsPktSetTailFromData(struct sk_buff *skb, unsigned int len)
+{
+	skb->tail = (unsigned int)((unsigned char *)skb->data + len -
+				   (unsigned char *)skb->head);
+}
+#else
 #define GET_OS_PKT_END(_pkt) \
 		(RTPKT_TO_OSPKT(_pkt)->end)
+
+static inline void RtmpOsPktSetTailFromData(struct sk_buff *skb, unsigned int len)
+{
+	skb->tail = (PUCHAR)(skb->data + len);
+}
+#endif
 
 #define GET_OS_PKT_NETDEV(_pkt) \
 		(RTPKT_TO_OSPKT(_pkt)->dev)
@@ -1154,10 +1232,13 @@ typedef struct usb_device_id USB_DEVICE_ID;
 #define RTUSB_ALLOC_URB(iso)		usb_alloc_urb(iso, GFP_ATOMIC)
 #define RTUSB_SUBMIT_URB(pUrb)		usb_submit_urb(pUrb, GFP_ATOMIC)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 35)
-#define RTUSB_URB_ALLOC_BUFFER(_dev, _size, _dma)	usb_alloc_coherent(_dev, _size, GFP_ATOMIC, _dma)
+/* RTMP_USB_COHERENT_GFP is GFP_KERNEL on ARM/ARM64: those SoCs are 32-bit DMA
+ * capable, so a GFP_ATOMIC coherent allocation would be served from the small
+ * atomic DMA pool and fail during probe.  See rt_6x_compat.h section 20. */
+#define RTUSB_URB_ALLOC_BUFFER(_dev, _size, _dma)	usb_alloc_coherent(_dev, _size, RTMP_USB_COHERENT_GFP, _dma)
 #define RTUSB_URB_FREE_BUFFER(_dev, _size, _addr, _dma)	usb_free_coherent(_dev, _size, _addr, _dma)
 #else
-#define RTUSB_URB_ALLOC_BUFFER(_dev, _size, _dma)	usb_buffer_alloc(_dev, _size, GFP_ATOMIC, _dma)
+#define RTUSB_URB_ALLOC_BUFFER(_dev, _size, _dma)	usb_buffer_alloc(_dev, _size, RTMP_USB_COHERENT_GFP, _dma)
 #define RTUSB_URB_FREE_BUFFER(_dev, _size, _addr, _dma)	usb_buffer_free(_dev, _size, _addr, _dma)
 #endif
 

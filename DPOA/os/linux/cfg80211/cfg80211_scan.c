@@ -188,6 +188,10 @@ BOOLEAN CFG80211DRV_OpsScanCheckStatus(
 	/* do scan */
 	pAd->cfg80211_ctrl.FlgCfg80211Scanning = TRUE;
 	return TRUE;
+#else
+	/* CONFIG_STA_SUPPORT is off: the body above is compiled out and this
+	 * BOOLEAN function would fall off the end (-Werror=return-type). */
+	return FALSE;
 #endif /*CONFIG_STA_SUPPORT*/	
 }
 

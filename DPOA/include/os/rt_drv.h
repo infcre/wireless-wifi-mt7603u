@@ -32,6 +32,7 @@
 #ifndef __RT_LINUX_H__
 #define __RT_LINUX_H__
 
+#include <rt_6x_compat.h>
 #include "os/rt_linux_cmm.h"
 #include <linux/string.h>
 #include <linux/ctype.h>
@@ -102,8 +103,11 @@ typedef VOID	pregs;
 /***********************************************************************************
  *	Compiler related definitions
  ***********************************************************************************/
-#undef __inline
-#define __inline		static inline
+/* Do NOT redefine `__inline`: the kernel uses it to build `asm_inline`, and
+ * modern kernels break if it is redefined. Use the private RT_INLINE macro. */
+#ifndef RT_INLINE
+#define RT_INLINE	static inline
+#endif
 #define IN
 #define OUT
 #define INOUT
@@ -463,9 +467,9 @@ void linux_pci_unmap_single(void *handle, ra_dma_addr_t dma_addr, size_t size, i
 #define PCI_MAP_SINGLE_DEV(_handle, _ptr, _size, _sd_idx, _dir)				\
 	linux_pci_map_single(_handle, _ptr, _size, _sd_idx, _dir)
 
-#define DMA_MAPPING_ERROR(_handle, _ptr)	\
-	dma_mapping_error(&((struct pci_dev *)(_handle))->dev, _ptr)
-	
+/* Removed: collided with the kernel's 1-argument DMA_MAPPING_ERROR and was
+ * never referenced by this driver. */
+
 #define PCI_UNMAP_SINGLE(_pAd, _ptr, _size, _dir)						\
 	linux_pci_unmap_single(((POS_COOKIE)(_pAd->OS_Cookie))->pci_dev, _ptr, _size, _dir)
 

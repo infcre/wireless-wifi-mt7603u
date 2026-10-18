@@ -1701,7 +1701,8 @@ PRX_CONTEXT _RTUSBDequeueRxContext(DL_LIST *list)
 PRX_CONTEXT RTUSBDequeueRxContext(PRTMP_ADAPTER pAd, DL_LIST *list)
 {
 	unsigned long flags;
-	PRX_CONTEXT *RxContext;
+	/* _RTUSBDequeueRxContext() returns PRX_CONTEXT, not PRX_CONTEXT *. */
+	PRX_CONTEXT RxContext;
 	NDIS_SPIN_LOCK *Lock;
 
 	Lock = RTUSBGetSpinLock(pAd, list);

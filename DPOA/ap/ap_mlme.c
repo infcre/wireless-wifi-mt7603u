@@ -26,7 +26,9 @@
  */
 
 #include "rt_config.h"
-#include <stdarg.h>
+/* The kernel is built with -nostdinc, so the userspace <stdarg.h> is not
+ * reachable. Use the kernel's own header (present since Linux 5.x). */
+#include <linux/stdarg.h>
 
 #ifdef BTCOEX_CONCURRENT
 extern void MT7662ReceCoexFromOtherCHip(

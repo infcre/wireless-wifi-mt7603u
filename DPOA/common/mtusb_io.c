@@ -131,7 +131,7 @@ NTSTATUS mtusb_read_reg(RTMP_ADAPTER *pAd, UINT32 addr, UINT32 *value)
 	UINT32 localVal;
 	UINT32 global_addr = mt_physical_addr_map(addr);
 
-	Status = mtusb_multiread(pAd, global_addr, &localVal, 4);
+	Status = mtusb_multiread(pAd, global_addr, (UCHAR *)&localVal, 4);
 	
 	*value = le2cpu32(localVal);
 	
@@ -147,11 +147,17 @@ NTSTATUS mtusb_write_reg(RTMP_ADAPTER *pAd, UINT32 addr, UINT32 value)
 	NTSTATUS Status;
 	UINT32 global_addr = mt_physical_addr_map(addr);
 
-	Status = mtusb_multiwrite(pAd, global_addr, &value, 4, 4); 
+	Status = mtusb_multiwrite(pAd, global_addr, (UCHAR *)&value, 4, 4); 
 
 	return Status;
 }
 
+/* ---------------------------------------------------------------------------
+ * The following three entry points are unimplemented stubs in this vendor
+ * drop (no callers reference them). They are declared NTSTATUS, so they must
+ * still return a value -- GCC 14 turns "no return statement in function
+ * returning non-void" into an error.
+ * ------------------------------------------------------------------------ */
 NTSTATUS RTUSBMultiWrite(
 	IN RTMP_ADAPTER *pAd,
 	IN USHORT Offset,
@@ -159,12 +165,12 @@ NTSTATUS RTUSBMultiWrite(
 	IN USHORT length,
 	IN BOOLEAN bWriteHigh)
 {
-
+	return STATUS_SUCCESS;
 }
 
 NTSTATUS RTUSBMultiWrite_OneByte(RTMP_ADAPTER *pAd, USHORT Offset, UCHAR *pData)
 {
-
+	return STATUS_SUCCESS;
 }
 
 NTSTATUS RTUSBMultiWrite_nBytes(
@@ -174,7 +180,7 @@ NTSTATUS RTUSBMultiWrite_nBytes(
 	IN USHORT len,
 	IN USHORT batchLen)
 {
-
+	return STATUS_SUCCESS;
 }
 
 NTSTATUS RTUSBWriteMACRegister(
@@ -183,7 +189,7 @@ NTSTATUS RTUSBWriteMACRegister(
 	IN UINT32 Value,
 	IN BOOLEAN bWriteHigh)
 {
-	mtusb_multiwrite(pAd, Offset, &Value, 4, 4);
+	return mtusb_multiwrite(pAd, Offset, (UCHAR *)&Value, 4, 4);
 }
 
 

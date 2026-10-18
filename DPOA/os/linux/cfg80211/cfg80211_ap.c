@@ -388,6 +388,9 @@ BOOLEAN CFG80211DRV_OpsBeaconSet(VOID *pAdOrg, VOID *pData)
 	CFG80211DRV_UpdateApSettingFromBeacon(pAd, apidx, pBeacon);
 	CFG80211_UpdateBeacon(pAd, pBeacon->beacon_head, pBeacon->beacon_head_len,
 			  	   pBeacon->beacon_tail, pBeacon->beacon_tail_len, TRUE);
+
+	/* BOOLEAN function with no return path (-Werror=return-type). */
+	return TRUE;
 }
 	
 BOOLEAN CFG80211DRV_OpsBeaconAdd(VOID *pAdOrg, VOID *pData)
@@ -406,7 +409,11 @@ BOOLEAN CFG80211DRV_OpsBeaconAdd(VOID *pAdOrg, VOID *pData)
 	CHAR tr_tb_idx = MAX_LEN_OF_MAC_TABLE + apidx;
 
 	/* for Concurrent, AP/P2P GO use HW_BSSID 1 */
+#ifdef RT_CFG80211_P2P_SUPPORT
 	wdev->hw_bssid_idx = CFG_GO_BSSID_IDX;
+#else
+	wdev->hw_bssid_idx = MAIN_MBSSID;
+#endif /* RT_CFG80211_P2P_SUPPORT */
 
 #ifdef RT_CFG80211_SUPPORT
 #ifdef RT_CFG80211_P2P_SUPPORT
@@ -1008,6 +1015,9 @@ INT CFG80211_ApStaDel(
 			DBGPRINT(RT_DEBUG_ERROR, ("Can't find pEntry(%02x:%02x:%02x:%02x:%02x:%02x) in ApStaDel\n",
 						 PRINT_MAC(pMac)));
 	}
+
+	/* INT function; the work above is done via side effects. */
+	return 0;
 }
 
 INT CFG80211_setApDefaultKey(
@@ -1042,6 +1052,9 @@ INT CFG80211_ApStaDelSendEvent(PRTMP_ADAPTER pAd, const PUCHAR mac_addr)
 		DBGPRINT(RT_DEBUG_TRACE, ("SINGLE_DEVICE CFG : GO NOITFY THE CLIENT Disconnected\n"));
 		CFG80211OS_DelSta(pAd->net_dev, mac_addr);
 	}	
+
+	/* INT function; notification is sent above. */
+	return 0;
 }
 
 VOID CFG80211_setApAssocRspExtraIe(VOID *pAdOrg, UCHAR *assocresp_ies, 

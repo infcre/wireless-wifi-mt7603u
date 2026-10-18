@@ -70,7 +70,7 @@ BOOLEAN CFG80211_CheckActionFrameType(
     		{
             		struct timeval tv;
             		do_gettimeofday(&tv);
-            		mgmt->u.probe_resp.timestamp = ((UINT64) tv.tv_sec * 1000000) + tv.tv_usec;
+            		mgmt->u.probe_resp.timestamp = ((UINT64) tv.tv_sec * 1000000) + RTMP_TV_USEC(tv);
     		}
 		}
 		else if (ieee80211_is_disassoc(mgmt->frame_control))

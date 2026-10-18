@@ -249,6 +249,10 @@ BOOLEAN RtmpPsIndicate(RTMP_ADAPTER *pAd, UCHAR *pAddr, UCHAR wcid, UCHAR Psm)
 		return RalPsIndicate(pAd, pAddr, wcid, Psm);
 	}
 #endif /* RTMP_MAC || RLT_MAC */
+
+	/* Neither HIF branch matched; report "not handled" instead of falling
+	 * off the end of a non-void function (-Werror=return-type). */
+	return FALSE;
 }
 
 

@@ -401,7 +401,10 @@ endif
 
 ifeq ($(RT28xx_MODE),AP)
 ifneq ($(PLATFORM),BB_SOC)
-	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_ap.o /tftpboot
+# OpenWrt port: disabled vendor /tftpboot copy -- the .ko stays in os/linux/
+# (packaging installs it from there; an OpenWrt build host has no /tftpboot,
+#  and cp would silently create a 60 MB *file* with that name).
+# ORIGINAL: 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_ap.o /tftpboot
 ifeq ($(OSABL),YES)
 	cp -f $(RT28xx_DIR)/os/linux/rtutil$(MODULE)_ap.o /tftpboot
 	cp -f $(RT28xx_DIR)/os/linux/rtnet$(MODULE)_ap.o /tftpboot
@@ -412,13 +415,19 @@ endif
 endif
 else	
 ifeq ($(RT28xx_MODE),APSTA)
-	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_apsta.o /tftpboot
+# OpenWrt port: disabled vendor /tftpboot copy -- the .ko stays in os/linux/
+# (packaging installs it from there; an OpenWrt build host has no /tftpboot,
+#  and cp would silently create a 60 MB *file* with that name).
+# ORIGINAL: 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_apsta.o /tftpboot
 ifeq ($(OSABL),YES)
 	cp -f $(RT28xx_DIR)/os/linux/rtutil$(MODULE)_apsta.o /tftpboot
 	cp -f $(RT28xx_DIR)/os/linux/rtnet$(MODULE)_apsta.o /tftpboot
 endif
 else
-	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_sta.o /tftpboot
+# OpenWrt port: disabled vendor /tftpboot copy -- the .ko stays in os/linux/
+# (packaging installs it from there; an OpenWrt build host has no /tftpboot,
+#  and cp would silently create a 60 MB *file* with that name).
+# ORIGINAL: 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_sta.o /tftpboot
 ifeq ($(OSABL),YES)
 	cp -f $(RT28xx_DIR)/os/linux/rtutil$(MODULE)_sta.o /tftpboot
 	cp -f $(RT28xx_DIR)/os/linux/rtnet$(MODULE)_sta.o /tftpboot
@@ -429,32 +438,35 @@ else
 
 ifeq ($(OSABL),YES)
 	cp -f os/linux/Makefile.6.util $(RT28xx_DIR)/os/linux/Makefile
-	$(MAKE) -C $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules
+	$(MAKE) -C $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules
 endif
 ifeq ($(PREALLOC), YES)
 	cp -f PREALLOC/os/linux/Makefile.6.prealloc PREALLOC/os/linux/Makefile
-	$(MAKE) -C $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/PREALLOC/os/linux modules
+	$(MAKE) -C $(LINUX_SRC) M=$(RT28xx_DIR)/PREALLOC/os/linux modules
 	$(SHELL) cp_prealloc.sh
 endif
 	cp -f os/linux/Makefile.6 $(RT28xx_DIR)/os/linux/Makefile
 ifeq ($(PLATFORM),DM6446)
-	$(MAKE)  ARCH=arm CROSS_COMPILE=arm_v5t_le- -C  $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules
+	$(MAKE)  ARCH=arm CROSS_COMPILE=arm_v5t_le- -C  $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules
 else
 ifeq ($(PLATFORM),FREESCALE8377)
-	$(MAKE) ARCH=powerpc CROSS_COMPILE=$(CROSS_COMPILE) -C  $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules
+	$(MAKE) ARCH=powerpc CROSS_COMPILE=$(CROSS_COMPILE) -C  $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules
 else
-	$(MAKE) -C $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules
+	$(MAKE) -C $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules
 endif
 endif
 
 ifeq ($(OSABL),YES)
 	cp -f os/linux/Makefile.6.netif $(RT28xx_DIR)/os/linux/Makefile
-	$(MAKE) -C $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules
+	$(MAKE) -C $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules
 endif
 
 ifeq ($(RT28xx_MODE),AP)
 ifneq ($(PLATFORM),BB_SOC)
-	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_ap.ko /tftpboot
+# OpenWrt port: disabled vendor /tftpboot copy -- the .ko stays in os/linux/
+# (packaging installs it from there; an OpenWrt build host has no /tftpboot,
+#  and cp would silently create a 60 MB *file* with that name).
+# ORIGINAL: 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_ap.ko /tftpboot
 ifeq ($(OSABL),YES)
 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_ap_util.ko /tftpboot
 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_ap_net.ko /tftpboot
@@ -462,13 +474,19 @@ endif
 endif
 else	
 ifeq ($(RT28xx_MODE),APSTA)
-	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_apsta.ko /tftpboot
+# OpenWrt port: disabled vendor /tftpboot copy -- the .ko stays in os/linux/
+# (packaging installs it from there; an OpenWrt build host has no /tftpboot,
+#  and cp would silently create a 60 MB *file* with that name).
+# ORIGINAL: 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_apsta.ko /tftpboot
 ifeq ($(OSABL),YES)
 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_apsta_util.ko /tftpboot
 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_apsta_net.ko /tftpboot
 endif
 else
-	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_sta.ko /tftpboot
+# OpenWrt port: disabled vendor /tftpboot copy -- the .ko stays in os/linux/
+# (packaging installs it from there; an OpenWrt build host has no /tftpboot,
+#  and cp would silently create a 60 MB *file* with that name).
+# ORIGINAL: 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_sta.ko /tftpboot
 ifeq ($(OSABL),YES)
 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_sta_util.ko /tftpboot
 	cp -f $(RT28xx_DIR)/os/linux/$(MODULE)_sta_net.ko /tftpboot
@@ -477,8 +495,14 @@ endif
 endif
 endif
 
-plug_in:
-	$(MAKE) -C $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/tools/plug_in MODULE_FLAGS="$(WFLAGS)"
+# plug_in pulls its symbol table out of os/linux/Module.symvers
+# (KBUILD_EXTRA_SYMBOLS in tools/plug_in/Makefile).  `all` lists it as a sibling
+# prerequisite, so with `make -j` it used to start before that file existed and
+# modpost died with
+#     <...>/os/linux/Module.symvers: No such file or directory
+# Declaring the real dependency keeps `-j` usable.
+plug_in: $(TARGET)
+	$(MAKE) -C $(LINUX_SRC) M=$(RT28xx_DIR)/tools/plug_in MODULE_FLAGS="$(WFLAGS)"
 
 release: build_tools
 	$(MAKE) -C $(RT28xx_DIR)/striptool -f Makefile.release clean
@@ -546,7 +570,7 @@ ifneq (,$(findstring 2.4,$(LINUX_SRC)))
 	$(MAKE) -C $(RT28xx_DIR)/os/linux/
 else
 	cp -f os/linux/Makefile.libwapi.6 $(RT28xx_DIR)/os/linux/Makefile	
-	$(MAKE) -C  $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules	
+	$(MAKE) -C  $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules	
 endif	
 
 osutil:
@@ -556,7 +580,7 @@ ifneq (,$(findstring 2.4,$(LINUX_SRC)))
 	$(MAKE) -C $(RT28xx_DIR)/os/linux/
 else
 	cp -f os/linux/Makefile.6.util $(RT28xx_DIR)/os/linux/Makefile
-	$(MAKE) -C $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules
+	$(MAKE) -C $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules
 endif
 endif
 
@@ -567,7 +591,7 @@ ifneq (,$(findstring 2.4,$(LINUX_SRC)))
 	$(MAKE) -C $(RT28xx_DIR)/os/linux/
 else
 	cp -f os/linux/Makefile.6.netif $(RT28xx_DIR)/os/linux/Makefile
-	$(MAKE) -C $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules
+	$(MAKE) -C $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules
 endif
 endif
 
@@ -577,7 +601,7 @@ ifneq (,$(findstring 2.4,$(LINUX_SRC)))
 	$(MAKE) -C $(RT28xx_DIR)/os/linux/
 else
 	cp -f os/linux/Makefile.6 $(RT28xx_DIR)/os/linux/Makefile
-	$(MAKE) -C $(LINUX_SRC) SUBDIRS=$(RT28xx_DIR)/os/linux modules
+	$(MAKE) -C $(LINUX_SRC) M=$(RT28xx_DIR)/os/linux modules
 endif
 
 # Declare the contents of the .PHONY variable as phony.  We keep that information in a variable

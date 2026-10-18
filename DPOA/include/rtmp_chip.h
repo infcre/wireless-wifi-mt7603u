@@ -847,7 +847,11 @@ struct _RTMP_CHIP_OP {
 
 	/*  Calibration access related callback functions */
 	int (*eeinit)(struct _RTMP_ADAPTER *pAd);
-	BOOLEAN (*eeread)(struct _RTMP_ADAPTER *pAd, UINT16 offset, UINT32 *pValue);
+	/* These are 16-bit EEPROM word accesses. The single call site,
+	 * rt28xx_eeprom_read16(), passes a USHORT* -- so the declaration must be
+	 * USHORT*, not UINT32*. The UINT32 form was a latent bug: every
+	 * implementation (bin/efuse/flash/USB) takes a USHORT*. */
+	BOOLEAN (*eeread)(struct _RTMP_ADAPTER *pAd, UINT16 offset, USHORT *pValue);
 	int (*eewrite)(struct _RTMP_ADAPTER *pAd, USHORT offset, USHORT value);
 
 	/* ITxBf calibration */

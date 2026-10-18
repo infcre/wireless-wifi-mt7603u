@@ -4190,7 +4190,7 @@ void dbQueueEnqueue(UCHAR type, UCHAR *data)
 	/* Enqueue data*/
 	oldTail->type = type;
 	do_gettimeofday(&tval);
-	oldTail->timestamp = tval.tv_sec*1000000L + tval.tv_usec;
+	oldTail->timestamp = tval.tv_sec*1000000L + RTMP_TV_USEC(tval);
 	memcpy(oldTail->data, data, DBQ_DATA_LENGTH);
 }
 
@@ -5504,7 +5504,9 @@ static INT dump_ps_table(RTMP_ADAPTER *pAd, UINT32 ent_type, BOOLEAN bReptCli)
 		if (mt_wtbl_get_entry234(pAd, pEntry->wcid, &tb_entry) == FALSE) 
 		{
 			 DBGPRINT(RT_DEBUG_ERROR, ("%s():Cannot found WTBL2/3/4\n",__FUNCTION__));
-			 return;
+			 /* Function returns INT; a bare `return` is rejected by GCC 14
+			  * (-Wreturn-mismatch). Report "no table" and bail out. */
+			 return 0;
 		}
 		RTMP_IO_READ32(pAd, tb_entry.wtbl_addr[0]+12, &dw3->word);
 
@@ -6151,7 +6153,7 @@ INT32 ShowPseData(RTMP_ADAPTER *pAd, RTMP_STRING *arg)
 #ifdef RT_BIG_ENDIAN
 		MTMacInfoEndianChange(pAd, (PUCHAR)(PseData), TYPE_TMACINFO, 32);
 #endif
-		dump_tmac_info(pAd, PseData);
+		dump_tmac_info(pAd, (UCHAR *)PseData);
 
 #ifdef RT_BIG_ENDIAN
 		MTMacInfoEndianChange(pAd, (PUCHAR)(PseData), TYPE_TMACINFO, 32);

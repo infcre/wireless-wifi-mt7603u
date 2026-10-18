@@ -199,7 +199,10 @@ INT STASendPacket_New(RTMP_ADAPTER *pAd, PNDIS_PACKET pPacket)
 	/*              Here we set the PACKET_SPECIFIC flags(LLC, VLAN, DHCP/ARP, EAPOL). */
 	UserPriority = 0;
 	QueIdx = QID_AC_BE;
-	RTMPCheckEtherType(pAd, pPacket, tr_entry, wdev, &UserPriority, &QueIdx, wcid);
+	/* NOTE: argument 7 is `OUT UCHAR *pWcid` (see rtmp.h), so it must be an
+	 * address -- APSendPacket() passes &wcid. The STA copy dereferenced the
+	 * value instead, which no modern compiler accepts. */
+	RTMPCheckEtherType(pAd, pPacket, tr_entry, wdev, &UserPriority, &QueIdx, &wcid);
 	/*add hook point when enqueue*/
 	RTMP_OS_TXRXHOOK_CALL(WLAN_TX_ENQUEUE,pPacket,QueIdx,pAd);
 #if defined(DOT11Z_TDLS_SUPPORT) || defined(CFG_TDLS_SUPPORT)
@@ -2039,7 +2042,9 @@ DBGPRINT(RT_DEBUG_OFF, ("%s(): pMacEntry->wcid=%d\n", __FUNCTION__, pMacEntry->w
 	/*              Here we set the PACKET_SPECIFIC flags(LLC, VLAN, DHCP/ARP, EAPOL). */
 	UserPriority = 0;
 	QueIdx = QID_AC_BE;
-	RTMPCheckEtherType(pAd, pPacket, tr_entry, wdev, &UserPriority, &QueIdx, pMacEntry->wcid);
+	/* Same as above: argument 7 is a UCHAR*, and MAC_TABLE_ENTRY.wcid is a
+	 * UCHAR, so take its address. */
+	RTMPCheckEtherType(pAd, pPacket, tr_entry, wdev, &UserPriority, &QueIdx, &pMacEntry->wcid);
 
 #if defined(DOT11Z_TDLS_SUPPORT) || defined(CFG_TDLS_SUPPORT)
 #ifdef UAPSD_SUPPORT

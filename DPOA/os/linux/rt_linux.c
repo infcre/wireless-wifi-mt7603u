@@ -147,18 +147,56 @@ static inline VOID __RTMP_SetPeriodicTimer(
 	add_timer(pTimer);
 }
 
-/* convert NdisMInitializeTimer --> RTMP_OS_Init_Timer */
+/* ---------------------------------------------------------------------------
+ * Timer API port.
+ *
+ * Up to Linux 4.14 a timer was initialised with init_timer() and the driver
+ * carried its own context in timer_list.data, invoking it as
+ *     pTimer->function(pTimer->data)
+ *
+ * Two upstream changes break that:
+ *   - 4.15 removed init_timer(); timer_setup() installs a callback with the
+ *     signature `void (*)(struct timer_list *)`.
+ *   - modern kernels also removed timer_list.data entirely.
+ *
+ * Fortunately the change is mechanical here. This driver always passes the
+ * *address of the enclosing timer object* as the context -- e.g.
+ * RTMPInitTimer(pAd, &pAd->Mlme.PeriodicTimer, GET_TIMER_FUNCTION(X), pAd, ...)
+ * where the timer is a member of pAd -- and a struct's address equals the
+ * address of its first member. OS_NDIS_MINIPORT_TIMER IS struct timer_list, so
+ * the pointer handed to the upstream callback is exactly the value the old
+ * code passed via .data.
+ *
+ * The callback is therefore stateless: it reads the driver's own function
+ * pointer back out of timer->function and calls it with that pointer.
+ * ------------------------------------------------------------------------ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+static void rtmp_os_timer_adapter(struct timer_list *t)
+{
+	if (t->function)
+		((TIMER_FUNCTION)t->function)((unsigned long)(void *)t);
+}
+#endif
+
 static inline VOID __RTMP_OS_Init_Timer(
 	IN VOID *pReserved,
 	IN OS_NDIS_MINIPORT_TIMER * pTimer,
 	IN TIMER_FUNCTION function,
 	IN PVOID data)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+	timer_setup(pTimer, rtmp_os_timer_adapter, 0);
+	/* timer_setup() installs the adapter; keep the driver's function
+	 * pointer available for the adapter to dispatch through. */
+	((struct timer_list *)pTimer)->function =
+		(void (*)(struct timer_list *))function;
+#else
 	if (!timer_pending(pTimer)) {
 		init_timer(pTimer);
 		pTimer->data = (unsigned long)data;
 		pTimer->function = function;
 	}
+#endif
 }
 
 static inline VOID __RTMP_OS_Add_Timer(
@@ -186,7 +224,7 @@ static inline VOID __RTMP_OS_Del_Timer(
 	OUT BOOLEAN *pCancelled)
 {
 	if (timer_pending(pTimer))
-		*pCancelled = del_timer_sync(pTimer);
+		*pCancelled = RTMP_DEL_TIMER_SYNC(pTimer);
 	else
 		*pCancelled = TRUE;
 }
@@ -482,7 +520,9 @@ PNDIS_PACKET ClonePacket(PNET_DEV ndev, PNDIS_PACKET pkt, UCHAR *buf, ULONG sz)
 		pClonedPkt->dev = pRxPkt->dev;
 		pClonedPkt->data = buf;
 		pClonedPkt->len = sz;
-		pClonedPkt->tail = pClonedPkt->data + pClonedPkt->len;
+		/* skb->tail is an offset since 2.6.31, and ->data was just repointed
+		 * at an external buffer, so derive the offset from ->data. */
+		RtmpOsPktSetTailFromData(pClonedPkt, sz);
 	}
 
 	return pClonedPkt;
@@ -539,13 +579,13 @@ PNDIS_PACKET duplicate_pkt_vlan(
 		/* copy header (maybe with VLAN tag) */
 		VLAN_Size = VLAN_8023_Header_Copy(VLAN_VID, VLAN_Priority,
 						  pHeader802_3, HdrLen,
-						  skb->tail,
+						  skb_tail_pointer(skb),
 						  TPID);
 
 		skb_put(skb, HdrLen + VLAN_Size);
 
 		/* copy data body */
-		NdisMoveMemory(skb->tail, pData, DataSize);
+		NdisMoveMemory(skb_tail_pointer(skb), pData, DataSize);
 		skb_put(skb, DataSize);
 		skb->dev = pNetDev;
 		pPacket = OSPKT_TO_RTPKT(skb);
@@ -710,7 +750,9 @@ void wlan_802_11_to_802_3_packet(
 	pOSPkt->dev = pNetDev;
 	pOSPkt->data = pData;
 	pOSPkt->len = DataSize;
-	pOSPkt->tail = pOSPkt->data + pOSPkt->len;
+	/* skb->tail is an offset since 2.6.31, and ->data was just repointed at
+	 * an external buffer, so derive the offset from ->data. */
+	RtmpOsPktSetTailFromData(pOSPkt, DataSize);
 
 	/* copy 802.3 header */
 #ifdef CONFIG_AP_SUPPORT
@@ -859,8 +901,8 @@ void RtmpOSFileSeek(RTMP_OS_FD osfd, int offset)
 int RtmpOSFileRead(RTMP_OS_FD osfd, char *pDataPtr, int readLen)
 {
 	/* The object must have a read method */
-	if (osfd->f_op && osfd->f_op->read) {
-		return osfd->f_op->read(osfd, pDataPtr, readLen, &osfd->f_pos);
+	if (RTMP_FILE_READ_OK(osfd)) {
+		return RTMP_FILE_READ(osfd, pDataPtr, readLen);
 	} else {
 		DBGPRINT(RT_DEBUG_ERROR, ("no file read method\n"));
 		return -1;
@@ -870,12 +912,57 @@ int RtmpOSFileRead(RTMP_OS_FD osfd, char *pDataPtr, int readLen)
 
 int RtmpOSFileWrite(RTMP_OS_FD osfd, char *pDataPtr, int writeLen)
 {
-	return osfd->f_op->write(osfd, pDataPtr, (size_t) writeLen, &osfd->f_pos);
+	return RTMP_FILE_WRITE(osfd, pDataPtr, (size_t) writeLen);
 }
 
 
 static inline void __RtmpOSFSInfoChange(OS_FS_INFO * pOSFSInfo, BOOLEAN bSet)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	/* Port note (Linux >= 5.10).
+	 *
+	 * The original implementation raised privileges by writing
+	 * current->fsuid/fsgid and switched address spaces with set_fs(). Both
+	 * are gone: credentials are immutable and overridden via
+	 * override_creds(), and set_fs() was removed because kernel_read() /
+	 * kernel_write() handle user/kernel copies themselves.
+	 *
+	 * This matters for real behaviour, not just compilation: these calls
+	 * bracket filp_open()/kernel_write() for "MacDump.txt", "EEPROMDump.txt",
+	 * "RFDump.txt" and the EEPROM .bin load/save, and without the credential
+	 * override those writes fail for any non-root caller.
+	 *
+	 * NOTE: the credentials must come from RTMP_PREPARE_ROOT_CREDS(), which
+	 * passes &init_task. prepare_kernel_cred(NULL) warns and returns NULL on
+	 * Linux 6.12, and override_creds(NULL) then oopses in
+	 * atomic_inc(&new->usage) -- with the RTNL lock held, which wedged every
+	 * later netdev caller.
+	 *
+	 * Reference handling is deliberately left to the standard
+	 * override_creds()/revert_creds() pair: the returned cred is handed back
+	 * to revert_creds() via pOSFSInfo->cred, and no extra put_cred() is done
+	 * here (doing so could drop the count below zero).
+	 */
+	if (bSet) {
+		struct cred *root_creds = RTMP_PREPARE_ROOT_CREDS();
+
+		/* Never hand NULL to override_creds(): it dereferences the cred
+		 * immediately. If the allocation fails, simply skip the elevation
+		 * rather than taking the kernel down while holding RTNL. */
+		if (root_creds)
+			pOSFSInfo->cred = (void *)override_creds(root_creds);
+		else {
+			DBGPRINT(RT_DEBUG_ERROR,
+				 ("%s: prepare_kernel_cred failed, skipping cred override\n",
+				  __FUNCTION__));
+			pOSFSInfo->cred = NULL;
+		}
+	} else {
+		if (pOSFSInfo->cred)
+			revert_creds((const struct cred *)pOSFSInfo->cred);
+		pOSFSInfo->cred = NULL;
+	}
+#else
 	if (bSet) {
 		/* Save uid and gid used for filesystem access. */
 		/* Set user and group to 0 (root) */
@@ -899,15 +986,16 @@ static inline void __RtmpOSFSInfoChange(OS_FS_INFO * pOSFSInfo, BOOLEAN bSet)
 
 #endif
 #endif
-		pOSFSInfo->fs = get_fs();
-		set_fs(KERNEL_DS);
+		pOSFSInfo->fs = RTMP_GET_FS();
+		RTMP_SET_FS(KERNEL_DS);
 	} else {
-		set_fs(pOSFSInfo->fs);
+		RTMP_SET_FS(pOSFSInfo->fs);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29)
 		current->fsuid = pOSFSInfo->fsuid;
 		current->fsgid = pOSFSInfo->fsgid;
 #endif
 	}
+#endif /* LINUX_VERSION_CODE >= 5.10.0 */
 }
 
 
@@ -1189,13 +1277,30 @@ int RtmpOSWrielessEventSend(
 	else
 		wrqu.data.length = 0;
 
+	/*
+	 * OpenWrt port: only reach for wireless_send_event() when the running
+	 * cfg80211 was itself built with WEXT glue.
+	 *
+	 * wireless_send_event() lives in the kernel's net/wireless/wext-core.c and
+	 * is only compiled when CONFIG_WEXT_CORE is selected, i.e. when
+	 * cfg80211 is built with CFG80211_WEXT.  OpenWrt does not enable it, so the
+	 * symbol does not exist anywhere in the target's module namespace and
+	 * insmod fails with "unknown symbol wireless_send_event" -- a link-time
+	 * symptom that compiling alone happily hides (modpost only warned).
+	 * There is nothing to lose by dropping the event: on such a system
+	 * userspace (hostapd/wpa_supplicant) speaks nl80211 and never looks at
+	 * wext events.
+	 */
+#if RTMP_CFG80211_WEXT
 	wireless_send_event(pNetDev, eventType, &wrqu, (char *)pData);
+#else
+	(void)pNetDev; (void)eventType; (void)wrqu; (void)pData;
+#endif
 	return 0;
 }
 
 
-int RtmpOSWrielessEventSendExt(
-	IN PNET_DEV pNetDev,
+int RtmpOSWrielessEventSendExt(IN PNET_DEV pNetDev,
 	IN UINT32 eventType,
 	IN INT flags,
 	IN PUCHAR pSrcMac,
@@ -1222,7 +1327,13 @@ int RtmpOSWrielessEventSendExt(
 
 	wrqu.addr.sa_family = family;
 
+#if RTMP_CFG80211_WEXT
 	wireless_send_event(pNetDev, eventType, &wrqu, (char *)pData);
+#else
+	/* See RtmpOSWrielessEventSend(): cfg80211 without WEXT has no
+	 * wireless_send_event symbol at all. */
+	(void)pNetDev; (void)eventType; (void)wrqu; (void)pData;
+#endif
 	return 0;
 }
 
@@ -1700,7 +1811,10 @@ int RtmpOSNetDevAttach(
 #endif
 
 #ifdef CONFIG_STA_SUPPORT
-#if WIRELESS_EXT >= 12
+/* OpenWrt port: net_device only carries wireless_handlers when the kernel was
+ * built with CONFIG_WIRELESS_EXT (netdevice.h guards the field); OpenWrt does
+ * not build any WEXT, so this whole block must vanish there. */
+#if (WIRELESS_EXT >= 12) && RT_COMPAT_NETDEV_WEXT
 		if (OpMode == OPMODE_STA) {
 /*			pNetDev->wireless_handlers = &rt28xx_iw_handler_def; */
 			pNetDev->wireless_handlers = pDevOpHook->iw_handler;
@@ -1709,7 +1823,7 @@ int RtmpOSNetDevAttach(
 #endif /* CONFIG_STA_SUPPORT */
 
 #ifdef CONFIG_APSTA_MIXED_SUPPORT
-#if WIRELESS_EXT >= 12
+#if (WIRELESS_EXT >= 12) && RT_COMPAT_NETDEV_WEXT
 		if (OpMode == OPMODE_AP) {
 /*			pNetDev->wireless_handlers = &rt28xx_ap_iw_handler_def; */
 			pNetDev->wireless_handlers = pDevOpHook->iw_handler;
@@ -1921,8 +2035,8 @@ VOID RtmpDrvAllMacPrint(
 	if (!msg)
 		return;
 
-	orig_fs = get_fs();
-	set_fs(KERNEL_DS);
+	orig_fs = RTMP_GET_FS();
+	RTMP_SET_FS(KERNEL_DS);
 
 	/* open file */
 	file_w = filp_open(fileName, O_WRONLY | O_CREAT, 0);
@@ -1931,7 +2045,7 @@ VOID RtmpDrvAllMacPrint(
 			 ("-->2) %s: Error %ld opening %s\n", __FUNCTION__,
 			  -PTR_ERR(file_w), fileName));
 	} else {
-		if (file_w->f_op && file_w->f_op->write) {
+		if (RTMP_FILE_WRITE_OK(file_w)) {
 			file_w->f_pos = 0;
 			macAddr = AddrStart;
 
@@ -1941,7 +2055,7 @@ VOID RtmpDrvAllMacPrint(
 				sprintf(msg, "%04x = %08x\n", macAddr, macValue);
 
 				/* write data to file */
-				file_w->f_op->write(file_w, msg, strlen(msg), &file_w->f_pos);
+				RTMP_FILE_WRITE(file_w, msg, strlen(msg));
 
 				printk("%s", msg);
 				macAddr += AddrStep;
@@ -1950,7 +2064,7 @@ VOID RtmpDrvAllMacPrint(
 		}
 		filp_close(file_w, NULL);
 	}
-	set_fs(orig_fs);
+		RTMP_SET_FS(orig_fs);
 	os_free_mem(NULL, msg);
 }
 
@@ -1972,8 +2086,8 @@ VOID RtmpDrvAllE2PPrint(
 	if (!msg)
 		return;
 
-	orig_fs = get_fs();
-	set_fs(KERNEL_DS);
+	orig_fs = RTMP_GET_FS();
+	RTMP_SET_FS(KERNEL_DS);
 
 	/* open file */
 	file_w = filp_open(fileName, O_WRONLY | O_CREAT, 0);
@@ -1982,7 +2096,7 @@ VOID RtmpDrvAllE2PPrint(
 			 ("-->2) %s: Error %ld opening %s\n", __FUNCTION__,
 			  -PTR_ERR(file_w), fileName));
 	} else {
-		if (file_w->f_op && file_w->f_op->write) {
+		if (RTMP_FILE_WRITE_OK(file_w)) {
 			file_w->f_pos = 0;
 			eepAddr = 0x00;
 
@@ -1991,7 +2105,7 @@ VOID RtmpDrvAllE2PPrint(
 				sprintf(msg, "%08x = %04x\n", eepAddr, eepValue);
 
 				/* write data to file */
-				file_w->f_op->write(file_w, msg, strlen(msg), &file_w->f_pos);
+				RTMP_FILE_WRITE(file_w, msg, strlen(msg));
 
 				printk("%s", msg);
 				eepAddr += AddrStep;
@@ -2002,7 +2116,7 @@ VOID RtmpDrvAllE2PPrint(
 		}
 		filp_close(file_w, NULL);
 	}
-	set_fs(orig_fs);
+		RTMP_SET_FS(orig_fs);
 	os_free_mem(NULL, msg);
 }
 
@@ -2015,9 +2129,8 @@ VOID RtmpDrvAllRFPrint(
 	struct file *file_w;
 	RTMP_STRING *fileName = "RFDump.txt";
 	mm_segment_t orig_fs;
-
-	orig_fs = get_fs();
-	set_fs(KERNEL_DS);
+	orig_fs = RTMP_GET_FS();
+	RTMP_SET_FS(KERNEL_DS);
 
 	/* open file */
 	file_w = filp_open(fileName, O_WRONLY | O_CREAT, 0);
@@ -2026,14 +2139,14 @@ VOID RtmpDrvAllRFPrint(
 			 ("-->2) %s: Error %ld opening %s\n", __FUNCTION__,
 			  -PTR_ERR(file_w), fileName));
 	} else {
-		if (file_w->f_op && file_w->f_op->write) {
+		if (RTMP_FILE_WRITE_OK(file_w)) {
 			file_w->f_pos = 0;
 			/* write data to file */
-			file_w->f_op->write(file_w, pBuf, BufLen, &file_w->f_pos);
+			RTMP_FILE_WRITE(file_w, pBuf, BufLen);
 		}
 		filp_close(file_w, NULL);
 	}
-	set_fs(orig_fs);
+		RTMP_SET_FS(orig_fs);
 }
 
 

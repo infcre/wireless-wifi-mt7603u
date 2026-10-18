@@ -208,7 +208,9 @@ BOOLEAN CFG80211DRV_OpsRemainOnChannel(VOID *pAdOrg, VOID *pData, UINT32 duratio
 	//lock_channel = CFG80211_getCenCh(pAd, pChanInfo->ChanId);
 	lock_channel = pChanInfo->ChanId;
 	if (pAd->LatchRfRegs.Channel != lock_channel
+#ifdef CONFIG_STA_SUPPORT
 	|| (INFRA_ON(pAd) && (pAd->StaCfg.wdev.bw == BW_40))
+#endif /* CONFIG_STA_SUPPORT */
 ) 
 	{
 		DBGPRINT(RT_DEBUG_TRACE, ("CFG80211_PKT: ROC CHANNEL_LOCK %d\n", pChanInfo->ChanId));
@@ -262,6 +264,9 @@ BOOLEAN CFG80211DRV_OpsCancelRemainOnChannel(VOID *pAdOrg, UINT32 cookie)
 		CmdACQueue_Control(pAd, 2, 0, 15);
 		pAd->cfg80211_ctrl.Cfg80211RocTimerRunning = FALSE;
 	}
+
+	/* BOOLEAN function with no return path (-Werror=return-type). */
+	return TRUE;
 }
 
 INT CFG80211_setPowerMgmt(VOID *pAdCB, UINT Enable)
@@ -608,14 +613,15 @@ VOID CFG80211_LostP2pGoInform(VOID *pAdCB)
 	{
 
 
-	        if (pNetDev->ieee80211_ptr->sme_state == CFG80211_SME_CONNECTING)
+	        if (RTMP_WDEV_IS_CONNECTING(pNetDev->ieee80211_ptr))
        	 	{
                    cfg80211_connect_result(pNetDev, NULL, NULL, 0, NULL, 0,
                                                                    WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_KERNEL);
         	}
-        	else if (pNetDev->ieee80211_ptr->sme_state == CFG80211_SME_CONNECTED)
+        	else if (RTMP_WDEV_IS_CONNECTED(pNetDev->ieee80211_ptr))
         	{
-                   cfg80211_disconnected(pNetDev, 0, NULL, 0, GFP_KERNEL);
+                   /* We are tearing the GO down ourselves. */
+                   RTMP_CFG80211_DISCONNECTED(pNetDev, 0, NULL, 0, TRUE);
         	}
 	}
 	else

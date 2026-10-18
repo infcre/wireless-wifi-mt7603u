@@ -720,6 +720,11 @@ USHORT	RtmpUSB_WriteFragTxResource(
 
 
 	return(Status);
+#else
+	/* MT_MAC (Andes/MCU) parts do not use this legacy RTMP/RLT USB fragment
+	 * writer; the body above is compiled out, so report success explicitly
+	 * (GCC 14 -Werror=return-type). */
+	return NDIS_STATUS_SUCCESS;
 #endif
 }
 

@@ -43,7 +43,11 @@ struct mt_wlanTxRxHookOps {
 };
 
 
-void RtmpOsTxRxHookInit(VOID);
+/* NOTE: this header is pulled in early (RTMP_WLAN_HOOK_SUPPORT), before the
+ * driver's VOID typedef is necessarily visible, and C23 rejects an old-style
+ * `f(VOID)` declaration as "parameter names without types". `void` is correct
+ * and always available. */
+void RtmpOsTxRxHookInit(void);
 int RtmpOsTxRxHookCall(unsigned short hook,struct sk_buff *skb, unsigned char queldx,void *priv);
 int RtmpOsTxRxHookRegister(struct mt_wlanTxRxHookOps *ops);
 int RtmpOsTxRxHookUnRegister(struct mt_wlanTxRxHookOps *ops);

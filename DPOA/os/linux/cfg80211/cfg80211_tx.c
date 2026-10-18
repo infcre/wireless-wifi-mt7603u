@@ -52,8 +52,11 @@ VOID CFG80211_SwitchTxChannel(RTMP_ADAPTER *pAd, ULONG Data)
 
 
 	if (INFRA_ON(pAd) &&
+#ifdef CONFIG_STA_SUPPORT
 	   	     (((pAd->LatchRfRegs.Channel != pAd->StaCfg.wdev.CentralChannel) && (pAd->StaCfg.wdev.CentralChannel != 0))) 
-	   	     || (pAd->LatchRfRegs.Channel != lock_channel))
+	   	     ||
+#endif /* CONFIG_STA_SUPPORT */
+	   	     (pAd->LatchRfRegs.Channel != lock_channel))
 	{
 
 		bbp_set_bw(pAd, BW_20);
@@ -183,6 +186,9 @@ INT CFG80211_SendMgmtFrame(RTMP_ADAPTER *pAd, VOID *pData, ULONG Data)
 		}
 	}
 
+	/* INT function: every branch above is a side effect, but GCC 14 rejects
+	 * falling off the end (-Werror=return-type). */
+	return 0;
 }
 
 VOID CFG80211_SendMgmtFrameDone(RTMP_ADAPTER *pAd, USHORT Sequence)
@@ -233,8 +239,10 @@ VOID CFG80211_ParseBeaconIE(RTMP_ADAPTER *pAd, BSS_STRUCT *pMbss, struct wifi_de
 	
 	 if ((wpa_ie != NULL)) //wpapsk/tkipaes case
 	{
-		pEid = wpa_ie;
-		pTmp = pEid;
+		/* wpa_ie is a raw UCHAR* byte pointer; the parser walks it as an
+		 * EID structure. Make that reinterpretation explicit. */
+		pEid = (PEID_STRUCT)wpa_ie;
+		pTmp = (PUCHAR)pEid;
 		if (NdisEqualMemory(pEid->Octet, WPA_OUI, 4))
 		{
 			wdev->AuthMode = Ndis802_11AuthModeOpen;
@@ -344,8 +352,8 @@ VOID CFG80211_ParseBeaconIE(RTMP_ADAPTER *pAd, BSS_STRUCT *pMbss, struct wifi_de
 		PRSN_IE_HEADER_STRUCT			pRsnHeader;
 		PCIPHER_SUITE_STRUCT			pCipher;
 
-		pEid = rsn_ie;
-		pTmp = pEid;
+		pEid = (PEID_STRUCT)rsn_ie;
+		pTmp = (PUCHAR)pEid;
 		pRsnHeader = (PRSN_IE_HEADER_STRUCT) pTmp;
 				
 				/* 0. Version must be 1*/
