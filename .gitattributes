@@ -1,0 +1,14 @@
+# Several files in this repository are *delivered to a router* and executed by
+# busybox ash (tools/router/mt7603u.init is copied to /etc/init.d/, the .sh
+# helpers are piped into `sh -s`).  On a Windows checkout with the usual
+# core.autocrlf=true they would come out with CRLF, and the first line then
+# fails with `not found` -- a confusing failure far from its cause.
+#
+# So: keep LF in the repository *and* in every checkout, whatever autocrlf says.
+*.sh       text eol=lf
+*.init     text eol=lf
+*.mk       text eol=lf
+Makefile   text eol=lf
+*.c        text eol=lf
+*.h        text eol=lf
+*.md       text eol=lf
