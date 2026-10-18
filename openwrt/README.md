@@ -185,7 +185,7 @@ chmod 755 /etc/init.d/mt7603u
 删掉 OpenWrt 自动收编的 radio → 无桥起 hostapd（`-P` pidfile）→ 等 `AP-ENABLED` →
 `ip link set master br-lan` 并**等端口进入 forwarding**。
 
-参数在脚本开头（`SSID`/`PSK`/`CHANNEL`/`BRIDGE`/`MODULE`），日志在 `/tmp/mt7603u.log`。
+参数在脚本开头（`SSID`/`PSK`/`CHANNEL`/`HT_WIDTH`/`BRIDGE`/`MODULE`），日志在 `/tmp/mt7603u.log`。
 
 **为什么不能按名字匹配接口**（这台机器上不止一块无线）：
 
@@ -222,6 +222,85 @@ ath9k 与其它 USB 网卡在不在，都不会误伤。
    确认稳定再重新 `enable`。
 
 脚本本身对"没有卡"是安全的：找不到 netdev 就记一行日志后退出，不会卡启动。
+
+### 3d. 信道宽度：20 MHz / 40 MHz
+
+脚本里对应 `HT_WIDTH`（默认 `40`）。它只改 hostapd 配置里 `ht_capab` 的内容：
+
+| `HT_WIDTH` | 生成的 `ht_capab` | 含义 |
+|---|---|---|
+| `20` | `[SHORT-GI-20]` | HT20，一个半区 |
+| `40` | `[HT40-][SHORT-GI-20][SHORT-GI-40]` + `noscan=1` | HT40，两个半区 |
+
+2.4 GHz 上第二半区由主信道决定：1–7 用 `HT40+`，7–13 用 `HT40-`（脚本按 `CHANNEL` 自动选）。
+于是 `CHANNEL=11` + 40 MHz ⇒ `HT40-`，中心频率 2442 MHz，占用 2422–2482 MHz（ch 7–11）。
+
+**改宽度不需要重新编模块**：改 `HT_WIDTH` 后 `/etc/init.d/mt7603u restart` 即可（反之亦然）。
+
+客户端侧最省事的验证：看手机 WiFi 详情里的"链接速度"——2 流时 20 MHz 是 144 Mbit/s、
+40 MHz 是 300 Mbit/s（1 流则 72 → 150）。
+
+#### 40 MHz 在这条路径上是怎么走通的（读源码得出的，不是猜的）
+
+backports 6.12.6 的 `struct cfg80211_ops` **已经没有 `set_channel` 了**（3.8 起被 `start_ap` 的
+chandef 取代），厂商驱动里的 `.set_channel` 包在 `#if LINUX_VERSION_CODE < 3.8` 里、根本不参与
+编译，`.set_monitor_channel` 在源码里也是注释掉的。所以 hostapd "设信道" 这一步只是把 chandef
+存进 `wdev->u.ap.preset_chandef`，**宽度是在 `start_ap` 时才落到硬件上**：
+
+```
+hostapd (ht_capab=[HT40-]) → NL80211_CMD_SET_WIPHY → preset_chandef{2462 MHz, 40 MHz, center 2442}
+hostapd → NL80211_CMD_START_AP(settings->chandef)
+   → CFG80211_OpsStartAp()                       os/linux/cfg80211/cfg80211.c:2366
+   → cfg80211_get_chandef_type() = NL80211_CHAN_HT40MINUS
+   → RTMP_DRIVER_80211_CHAN_SET
+   → CFG80211DRV_OpsSetChannel()                 os/linux/cfg80211/cfg80211drv.c:557
+   → RegTransmitSetting.field.BW = BW_40, EXTCHA = EXTCHA_BELOW
+   → SetCommonHT() + bbp_set_bw(BW_40) + AsicSwitchChannel(CentralChannel = 9)
+```
+
+也就是说：这个驱动的 40 MHz 不是"beacon 里多一个 IE"，而是**把射频真的切到中心信道 9**。
+
+#### 真机验证：dmesg（驱动自己的话）+ 空口（beacon 里的 HT Operation IE）
+
+```
+20 MHz:  80211> ChanInfo.ChanType == 1!   (= HT20)        最后落频: Ch#11, BBP_BW=0
+40 MHz:  80211> ChanInfo.ChanType == 2!   (= HT40MINUS)   最后落频: Ch#9,  BBP_BW=1
+```
+
+空口侧用机器上另一块 ath9k 扫自己的 beacon（`iw dev phy0-sta0 scan freq 2462 2437 2412`）：
+
+```
+20 MHz:  * secondary channel offset: no secondary   * STA channel width: 20 MHz
+40 MHz:  * secondary channel offset: below          * STA channel width: any
+```
+
+`status` 现在把这两件事直接摊开：
+
+```
+ht width  : 40MHz ch=11  ht_capab=[HT40-][SHORT-GI-20][SHORT-GI-40]
+driver bw : Switch to Ch#9(2T2R), BBP_BW=1   (BBP_BW: 0=20MHz, 1=40MHz)
+```
+
+#### 两个测量上的坑（都踩过）
+
+* **`noscan=1` 是必须的。** 2.4 GHz 开 HT40 时 hostapd 会先扫邻居做 40 MHz 共存判定，而这个
+  厂商驱动的 AP 模式扫描不可靠（同一路 cfg80211 scan 就是 `iwinfo` 在这儿不工作的原因），
+  `noscan=1` 跳过该判定。hostapd 还会拿 `ht_capab` 里的位去比驱动上报的 HT 能力，本驱动报的是
+  `SUP_WIDTH_20_40 | SGI_20 | SGI_40`，所以两个 short-GI 位都合法。
+* **别拿 `nmcli dev wifi list` 的 RATE 列判断宽度。** 它是"新扫的 5 GHz + 旧的 2.4 GHz 缓存"混在
+  一起的，实测滞后一个状态（40→270、20→270、40→130）。要读宽度就强制指定频段：
+  `iw dev <if> scan freq 2462 2437 2412`，然后看 `HT operation` 段。
+  另外 intel 网卡在已连接状态下 `iw scan` 只回当前 BSS（别的信道根本看不到），所以最后是用
+  路由器上**另一块 ath9k** 扫自己的 beacon 才拿到干净结果——扫自己不影响被测 AP。
+
+#### 40 MHz 值不值得：先量再留
+
+这台机器位置扫到的邻居：校园网 2.4 GHz 就在 **ch 11**（信号 70，与我们的主信道同频），
+另有 ch 1、ch 6 两个。40 MHz（HT40-，占 ch 7–11）的第二半区 ch 7–9 反倒是空的，
+所以这个位置开 40 MHz 不算太亏；但同频那个 AP 还在，40 MHz 会一并暴露在它的干扰下。
+**如果实测没变快（甚至更慢），把 `HT_WIDTH` 改回 `20` 就退回去了**，其它都不用动。
+另外：若能接受，`CHANNEL=13` + HT40-（第二半区 ch 9）是完全避开校园网 ch 11 的选项，
+代价是极少数老设备不认 ch 13。
 
 ---
 

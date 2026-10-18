@@ -45,6 +45,22 @@ MODULE=mt7603u_ap          # kmod-mt7603u-ap: AP mode.  (sta module: mt7603u_sta
 SSID=MT7603U-AP
 PSK=mt7603u12345
 CHANNEL=11
+# --- channel width ---------------------------------------------------------
+# 20 = HT20 (one 20 MHz half).  40 = HT40, i.e. 802.11n on two adjacent halves.
+#
+# On 2.4 GHz the second half is fixed by the primary channel: 1-7 -> HT40+
+# (second half above), 7-13 -> HT40- (below).  Channel 11 therefore means HT40-
+# with a 2442 MHz center, occupying 2422-2482 MHz (channels 7..11).
+#
+# 40 MHz doubles the peak rate (72/144 -> 150/300 Mbit/s) but also doubles the
+# spectrum used.  In a crowded 2.4 GHz band -- campus, neighbours on ch 6 -- it
+# is often *slower* than 20 MHz because it collides with everyone, so measure
+# before keeping it.  Set back to 20 to revert; nothing else changes.
+#
+# noscan=1 is added for 40 MHz only: hostapd otherwise scans for neighbouring
+# BSSes before allowing HT40, and this vendor driver's AP-mode scan is not to be
+# trusted (it is the same cfg80211 scan path that iwinfo calls broken here).
+HT_WIDTH=40
 BRIDGE=br-lan              # enslave the AP here so clients use the LAN's DHCP/NAT
 CONF=/etc/mt7603u/hostapd.conf
 PIDFILE=/var/run/hostapd-mt7603u.pid
@@ -169,8 +185,30 @@ drop_detected_radio() {
 	return 0
 }
 
+# HT40 sideband for the configured primary channel (2.4 GHz): "+" when the
+# second half sits above it, "-" when below.  Channels 5..7 accept either side;
+# take the low end so a low channel can never run off the bottom of the band.
+ht_side() {
+	[ "$CHANNEL" -le 7 ] && echo "+" || echo "-"
+}
+
+# hostapd reads the width out of ht_capab, so this is where HT_WIDTH lands.
+# hostapd checks the bits against the driver's advertised HT capabilities: this
+# driver reports IEEE80211_HT_CAP_SUP_WIDTH_20_40 | SGI_20 | SGI_40, so both
+# short-GI bits are legal.
+ht_capab_block() {
+	if [ "$HT_WIDTH" = "40" ]; then
+		echo "ht_capab=[HT40$(ht_side)][SHORT-GI-20][SHORT-GI-40]"
+		# skip the coexistence scan (see the note in the settings block)
+		echo "noscan=1"
+	else
+		echo "ht_capab=[SHORT-GI-20]"
+	fi
+}
+
 write_conf() {
 	iface="$1"
+	ht="$(ht_capab_block)"
 	mkdir -p /etc/mt7603u
 	cat > "$CONF" <<EOF
 interface=$iface
@@ -182,7 +220,7 @@ ssid=$SSID
 hw_mode=g
 channel=$CHANNEL
 ieee80211n=1
-ht_capab=[SHORT-GI-20]
+$ht
 wmm_enabled=1
 
 auth_algs=1
@@ -288,7 +326,7 @@ start() {
 		log "bridged $IFACE -> $BRIDGE (port state $(cat "/sys/class/net/$IFACE/brport/state" 2>/dev/null) after ${n}s, 3=forwarding)"
 	fi
 
-	log "=== up: ssid=$SSID ch=$CHANNEL iface=$IFACE ==="
+	log "=== up: ssid=$SSID ch=$CHANNEL ht=${HT_WIDTH}MHz iface=$IFACE ==="
 }
 
 stop() {
@@ -320,5 +358,9 @@ status() {
 	echo "module    : $(grep -c "^$MODULE " /proc/modules 2>/dev/null) loaded"
 	echo "hostapd   : $(ps | grep -c '[h]ostapd .*mt7603u') instance(s)"
 	echo "AP state  : $(grep -o 'AP-ENABLED\|AP-DISABLED' "$LOG" 2>/dev/null | tail -1)"
+	echo "ht width  : ${HT_WIDTH}MHz ch=$CHANNEL  $(ht_capab_block | head -1)"
+	# What the radio actually latched.  A 40 MHz switch shows up as a central
+	# channel 4 apart from the primary (11 -> 9 for HT40-), with BBP_BW=1.
+	echo "driver bw : $(dmesg 2>/dev/null | sed -n 's/.*\(Switch to Ch#[0-9]*(2T2R), BBP_BW=[0-9]\).*/\1/p' | tail -1)   (BBP_BW: 0=20MHz, 1=40MHz)"
 	echo "log       : $LOG"
 }

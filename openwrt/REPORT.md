@@ -374,6 +374,60 @@ TX 基本一致；OpenWrt 侧 RX 偏低，主要变量是**卡现在直接插在
 
 可直接复用的脚本：[`../tools/router/bring-up-ap.sh`](../tools/router/bring-up-ap.sh)。
 
+### 3.8 信道宽度：20 MHz → 40 MHz（真机追加）
+
+能开，而且**不用重编模块**——它是 hostapd 的一个配置项。但这个驱动把宽度落到射频的路径值得
+记下来，因为 3.8 之后的老写法在这儿全是错的路子。
+
+#### 宽度不是"设信道"设的，而是 `start_ap` 时设的
+
+backports 6.12.6 的 `struct cfg80211_ops` **已经没有 `set_channel`**（3.8 起被 `start_ap` 的
+chandef 取代）。本驱动里 `.set_channel` 被 `#if LINUX_VERSION_CODE < 3.8` 包住、根本不参与编译，
+`.set_monitor_channel` 在源码里也是注释状态（`//CFG_TODO`）。于是 hostapd 的
+`NL80211_CMD_SET_WIPHY` 只是把 chandef 存成 `wdev->u.ap.preset_chandef`
+（内核 `__nl80211_set_channel()` 的 AP 分支行为），**真正的宽度在下一条命令里**：
+
+```
+CFG80211_OpsStartAp()                                   os/linux/cfg80211/cfg80211.c:2366
+  settings->chandef → cfg80211_get_chandef_type()
+  → RTMP_DRIVER_80211_CHAN_SET → CFG80211DRV_OpsSetChannel()   cfg80211drv.c:557
+  → RegTransmitSetting.field.BW = BW_40 / EXTCHA = EXTCHA_BELOW
+  → SetCommonHT() + bbp_set_bw(BW_40) + AsicSwitchChannel(中心信道)
+```
+
+顺带印证：`CFG80211_OpsChannelSet()` 里 `ChanInfo.IfType = ...` 那行是被注释掉的，
+但 `OpsStartAp` 填的是 `RT_CMD_80211_IFTYPE_P2P_GO`(=9)，所以 dmesg 里能看到
+`80211> ChanInfo.IfType == 9!` —— 确实进了 AP 分支。
+
+#### 证据（同一台真机，20 MHz 与 40 MHz 各测一次）
+
+| | 20 MHz | 40 MHz |
+|---|---|---|
+| hostapd `ht_capab` | `[SHORT-GI-20]` | `[HT40-][SHORT-GI-20][SHORT-GI-40]` + `noscan=1` |
+| 驱动 dmesg（ChanType） | `== 1`（HT20） | `== 2`（HT40MINUS） |
+| 射频落点 | `Switch to Ch#11, BBP_BW=0` | `Switch to Ch#9, BBP_BW=1` ← 中心 2442 MHz |
+| 空口 beacon 的 HT Operation IE | `secondary channel offset: no secondary`<br>`STA channel width: 20 MHz` | `secondary channel offset: below`<br>`STA channel width: any` |
+
+beacon 那两行是用机器上**另一块 ath9k** 扫自己拿到的
+（`iw dev phy0-sta0 scan freq 2462 2437 2412` → 读 `HT operation` 段），是空口原始输出，
+不是配置文件的自述。
+
+#### 两个坑
+
+1. **`noscan=1` 必须加。** 2.4 GHz 开 HT40 前 hostapd 要扫邻居做 40 MHz 共存判定，而这条路用的
+   cfg80211 scan 在这个厂商驱动上本就不可靠（同 `iwinfo` 失效的根源）。
+2. **`nmcli dev wifi list` 的 RATE 列不能用来判断宽度。** 它是"新扫的 5 GHz + 缓存的 2.4 GHz"
+   混在一起，实测滞后一个状态（40→270、20→270、40→130），差点得出相反结论；要读宽度必须
+   `iw dev <if> scan freq ...` 指定频段。另外 intel 网卡已连接时 `iw scan` 只返回当前 BSS，
+   所以最终改用设备上第二块网卡扫（扫自己不影响被测 AP）。
+
+#### 现场环境（供取舍）
+
+校园网 2.4 GHz 的主 AP 就在 **ch 11**（信号 70，与主信道同频），另有 ch 1、ch 6。
+HT40-（占 ch 7–11）的第二半区 ch 7–9 是空的，本位置开 40 MHz 不算太亏；
+若要彻底避开同频，`CHANNEL=13` + HT40-（第二半区 ch 9）是可选方案（代价：少数老设备不认 13）。
+`HT_WIDTH` 改回 `20` 即可原样退回——脚本每次 `restart` 都会重写 hostapd 配置。
+
 
 ```
 owrt/
@@ -417,7 +471,8 @@ ipk 里写死了 `kernel (=6.6.93~1745ebad77278f5cdc8330d17a3f43d6-r1)`，
 |---|---|
 | OpenWrt **UCI/LuCI 集成** | 厂商驱动不是 mac80211，netifd 的 `wifi` 脚本不会管理它；包内提供 `hostapd.conf.example` / `wpa_supplicant.conf.example`，按脚本或自写 init 启动 |
 | AP 吞吐未在 OpenWrt 侧复测 | 手机上只做了关联/WPA/DHCP/ping。同驱动的 Debian 侧 AP 下行约 200 Mbps |
-| 未在 192.168.1.1 真机安装 | 按你的要求，全部验证都在虚拟机内完成 |
+| 真机安装 | 已在 192.168.1.1 上安装并长期运行（见 3.7 / 3.8），且已 `enable` 开机自启；回退与恢复办法见 README 第 3c 节 |
+| 40 MHz 的**吞吐**未做 A/B | 3.8 只验证到"射频落点与 beacon 都确实是 40 MHz"；真实快慢需要在被测 AP 上挂一个客户端跑 iperf3（该 AP 上目前只有用户的手机） |
 | `iw dev wlan0 station dump` 为空 | 与 Debian 相同的已知行为：驱动未通过 nl80211 导出 station 统计（数据面正常） |
 | 非 24.10 系列 | `RTMP_CFG80211_API_VER` 与 `symvers` 是按 24.10.2（backports 6.12.6）钉的；换版本需按 README 的"换版本"一节重做 |
 | 内核日志噪音 | `Not support for HIF_MT yet!` 等是 USB 路径的正常噪音（PCIe 专属功能），与 Debian 一致 |
