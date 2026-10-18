@@ -1,0 +1,19 @@
+# build output (the vendor tree ships some of these; new ones stay out of git)
+*.o
+*.ko
+*.cmd
+*.mod
+*.mod.c
+.tmp_versions/
+Module.symvers
+modules.order
+!DPOA/tools/plug_in/Module.symvers
+!DPOA/tools/plug_in/modules.order
+
+# local credentials for the test harness (copy .env.example)
+.env
+
+# editor / OS noise
+.DS_Store
+*.swp
+*~

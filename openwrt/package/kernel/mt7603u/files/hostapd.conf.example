@@ -1,0 +1,50 @@
+# Example hostapd configuration for the MT7603U vendor driver (AP mode).
+#
+#   cp /etc/mt7603u/hostapd.conf.example /etc/mt7603u/hostapd.conf
+#   hostapd -B /etc/mt7603u/hostapd.conf
+#
+# The driver is NOT driven by OpenWrt's UCI/wifi scripts: it is a vendor
+# cfg80211 driver, so netifd has no idea how to configure it.  Bring the
+# interface up by hand (or from your own init script):
+#
+#   ip link set wlan0 up
+#   ip addr add 192.168.50.1/24 dev wlan0      # only if it should serve clients
+#   hostapd -B /etc/mt7603u/hostapd.conf
+#
+# Check the real interface name first (`ip link`, usually wlan0 -- the driver
+# asks the kernel for "wlan%d").  To hand out DHCP you can point dnsmasq at the
+# interface, or bridge it into br-lan.
+
+interface=wlan0
+driver=nl80211
+ctrl_interface=/var/run/hostapd
+ctrl_interface_group=0
+
+ssid=MT7603U-AP
+hw_mode=g
+
+# Channel 11 measured far better than channel 1 for this card on a busy band.
+channel=11
+
+ieee80211n=1
+wmm_enabled=1
+
+# HT20 by default.  HT40 was measured to give *lower* RX throughput on this
+# card in a congested 2.4 GHz environment (RX CRC error rate was already ~29%).
+# Uncomment the next line for HT40, and drop the HT20 one.
+ht_capab=[SHORT-GI-20]
+# ht_capab=[HT40-][SHORT-GI-20][SHORT-GI-40]
+
+country_code=CN
+
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+wpa_passphrase=mt7603u12345
+
+logger_syslog=-1
+logger_syslog_level=2
+logger_stdout=-1
+logger_stdout_level=2

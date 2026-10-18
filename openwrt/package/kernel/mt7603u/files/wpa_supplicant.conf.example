@@ -1,0 +1,23 @@
+# Example wpa_supplicant configuration for the MT7603U vendor driver (STA mode).
+#
+#   wpa_supplicant -B -i wlan0 -c /etc/mt7603u/wpa_supplicant.conf
+#   udhcpc -i wlan0            # or `ifup wan2' with a UCI dhcp interface
+#
+# OpenWrt's netifd/wifi scripts cannot manage this driver (it is a vendor
+# cfg80211 driver, not a mac80211 one), so wpa_supplicant is run directly.
+#
+# IMPORTANT: keep SSID= empty in /etc/Wireless/RT2870STA/RT2870STA.dat.  That
+# file is parsed by the driver when the interface is opened; a non-empty SSID
+# there pins the association and overrides whatever wpa_supplicant negotiates.
+#
+# Also disable powersave -- with the driver's default, measured RX throughput
+# dropped from ~50 Mbit/s to ~22 Mbit/s:
+#   iw dev wlan0 set power_save off
+
+ctrl_interface=/var/run/wpa_supplicant
+ap_scan=1
+
+network={
+	ssid="OpenWrt"
+	psk="change-me"
+}
